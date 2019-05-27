@@ -31,11 +31,11 @@ function setup() {
   for (let i = 0; i < nParticles; i++) {
     particles.push(new Particle(random() * width, random() * height, radians(random() * 360)))
   }
-  
+
   //particles.push(new Particle(robot.pos.x, robot.pos.y, robot.heading(), 0.001))
   
 
-  //frameRate(10)
+  frameRate(5)
   //noLoop()
 
 
@@ -57,6 +57,7 @@ function draw() {
   
   robot.show()
   
+  //draw the walls
   for(wall of walls) {
     wall.show()
   }
@@ -67,9 +68,9 @@ function draw() {
   const weights = []
 
   for (particle of particles) {
-    particle.show(measurements)
+    particle.show()
     particle.predict(delta_t, std_pos, vel, yaw_rate)
-    particle.check(walls)
+    particle.check(walls, measurements)
 
     weights.push(particle.updateWeights(measurements, std_landmark))
 

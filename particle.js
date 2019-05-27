@@ -2,14 +2,13 @@
 class Particle {
 
     constructor(x, y, angle) {
-        this.rays = []
         this.measurements = []
         this.pos = createVector(x, y)
         this.dir = p5.Vector.fromAngle(angle)
         this.dir.normalize()
     }
 
-    show(robotMeasurements) {
+    show() {
         push()
         translate(this.pos.x, this.pos.y)
         fill(0, 255, 0)
@@ -19,19 +18,6 @@ class Particle {
         triangle(0, triangleSize / 4, 0, -triangleSize / 4, triangleSize, 0)
         
         pop()
-
-        this.rays = []
-        //if (!ray) {
-            for (let m of robotMeasurements) {
-                let ray = new Ray(createVector(this.pos.x, 
-                                               this.pos.y),
-                                               p5.Vector.fromAngle(m.theta + this.dir.heading() ))
-                //console.log(degrees(m.theta), m.theta)
-                //ray.show()
-                this.rays.push(ray)
-            }
-        //}
-
     }
 
     predict(delta_t, std_pos, vel, yaw_rate) {
@@ -58,11 +44,11 @@ class Particle {
 
         // para cada observação do robo, verificamos:
         for (let rMeasurement of robotMeasurements) {
-            // 1) qual ponto medido pela particula está mais perto do observado
-            // nearest neighbor
             let bestParticleFit = undefined
             let minDist = Infinity
-
+            
+            // 1) qual ponto medido pela particula está mais perto do observado
+            // nearest neighbor
             for (let pMeasurement of this.measurements) {
                 const d = dist(rMeasurement.point.x, rMeasurement.point.y, pMeasurement.point.x, pMeasurement.point.y)
                 if (d < minDist) {
@@ -72,9 +58,9 @@ class Particle {
             }
 
             //debug
-            let c = [50, 100, 150, 255]
+            /*let c = [50, 100, 150, 255]
 
-            /*if (bestParticleFit) {
+            if (bestParticleFit) {
                 push()
                 fill(c[i++])
                 circle(bestParticleFit.x, bestParticleFit.y, 10)
@@ -83,7 +69,8 @@ class Particle {
             }*/
 
             // 2) calcula o peso dado uma distribuição gaussiana multi variavel
-
+            // quanto mais distante o ponto estiver do medido pelo robo, maior a 
+            // propabilidade de ser excluída
             if (bestParticleFit) {
 
                 // applying Multivariate_normal_distribution
@@ -105,14 +92,25 @@ class Particle {
         return final_weight
     }
 
-    check(walls) {        
-        for (ray of this.rays) {
+    check(walls, robotMeasurements) {
+        //create rays for the particle using robot measurements
+        let rays = []
+        for (let m of robotMeasurements) {
+            let ray = new Ray(createVector(this.pos.x, 
+                                            this.pos.y),
+                                            p5.Vector.fromAngle(m.theta + this.dir.heading() ))
+            rays.push(ray)
+        }
+
+        // using the created rays, checks if there are walls
+        for (ray of rays) {
 
             let closest
             let minDist = Infinity
             for (wall of walls) {
                 let point = ray.intersects(wall)
                 if (point) {
+                    // get the distance of particle and the wall for the current ray
                     const d = dist(this.pos.x, this.pos.y, point.x, point.y)
                     if (d < minDist) {
                         closest = point
@@ -120,6 +118,7 @@ class Particle {
                     }
                 }
             }
+            // for each ray only gets the closest wall (avoid overshooting)
             if (closest) {
                 //stroke(255, 100)
                 //line(this.pos.x, this.pos.y, closest.x, closest.y)
