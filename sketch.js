@@ -1,3 +1,4 @@
+window['DEBUG'] = true
 
 let ray
 let walls
@@ -5,15 +6,13 @@ let robot
 let particles
 let nParticles = 2000
 
-let xoff = 0
-let yoff = 2000
-
 function setup() {
 
   createCanvas(600, 400)
   background(220)
 
-  robot = new Robot(createVector(width / 2, 50))
+  //robot = new Robot(createVector(random() * width, random() * height), 0)
+  robot = new Robot(createVector(100, 130), 0)
   ray = new Ray(createVector(0, 0))
   walls = []
 
@@ -29,14 +28,16 @@ function setup() {
 
   particles = []
   for (let i = 0; i < nParticles; i++) {
-    particles.push(new Particle(random() * width, random() * height, radians(random() * 360)))
+    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.0005)))
   }
 
-  //particles.push(new Particle(robot.pos.x, robot.pos.y, robot.heading(), 0.001))
+  //particles.push(new Particle(robot.pos.x, robot.pos.y + 0, robot.heading()))
+  //particles.push(new Particle(robot.pos.x, robot.pos.y + 100, robot.heading()))
+  //particles.push(new Particle(robot.pos.x, robot.pos.y + 200, robot.heading()))
   
 
-  frameRate(5)
-  //noLoop()
+  // frameRate(10)
+  // noLoop()
 
 
 }
@@ -45,17 +46,18 @@ let vel = 50
 let delta_t = 0.1
 let yaw_rate
 // x, y, theta
-let std_pos = [0.25, 0.25, 0.01]
-const std_landmark = [50, 50]
+let std_pos = [3, 3, 0.05]
+const std_landmark = [60, 60]
 
 
 function draw() {
 
   background(0)
 
-  yaw_rate = 0.5//randomGaussian(0, 2)
-  
+  yaw_rate = 0.09
+  // yaw_rate = 0
   robot.show()
+  
   
   //draw the walls
   for(wall of walls) {
@@ -68,13 +70,15 @@ function draw() {
   const weights = []
 
   for (particle of particles) {
-    particle.show()
-    particle.predict(delta_t, std_pos, vel, yaw_rate)
     particle.check(walls, measurements)
+    particle.predict(delta_t, std_pos, vel, yaw_rate)
+    particle.show()
 
     weights.push(particle.updateWeights(measurements, std_landmark))
 
   }
+
+  robot.move(vel, delta_t, yaw_rate)
 
   //resample
   const maxW = Math.max.apply(null, weights)
@@ -112,14 +116,16 @@ function draw() {
 
   particles = selectedParticles
 
-  robot.move(vel, delta_t, yaw_rate)
-
   //debug
   let stddevX = Math.sqrt(sigmaX * (1 / N))
   let stddevY = Math.sqrt(sigmaY * (1 / N))
 
   push()
-  fill(0, 200, 0, 50)
+  fill(0, 0, 255, 20)
   ellipse(meanX, meanY, Math.log(stddevX) * 8, Math.log(stddevY) * 8)
   pop()
+}
+
+function mousePressed() {
+  redraw()
 }

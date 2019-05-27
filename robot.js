@@ -4,12 +4,21 @@ class Robot {
   constructor(pos, angle) {
     this.size = 30
     this.dir = p5.Vector.fromAngle(angle)
+    this.dir.normalize()    
     this.pos = pos
+    this.createRays()
+  }
+
+  createRays() {
     this.rays = []
-    for (let i = 0; i < 360; i+=60) {
-      let rad = radians(i)
-      this.rays.push(new Ray(pos, createVector(cos(rad), sin(rad))))
+    for (let i = -60; i <= 60; i+=4) {
+      let angle = this.normalizeAngle(this.dir.heading() + radians(i))
+      this.rays.push(new Ray(this.pos, p5.Vector.fromAngle(angle)))
     }
+
+    // console.log(this.dir.heading() )
+    // let rad = this.dir.heading() + PI/2
+    // this.rays.push(new Ray(this.pos, createVector(cos(rad), sin(rad))))
   }
 
   show() {
@@ -27,7 +36,7 @@ class Robot {
     
     for (ray of this.rays) {
       ray.pos.x = this.pos.x
-      ray.pos.y = this.pos.y
+      ray.pos.y = this.pos.y     
       ray.show()
     }
   }
@@ -43,6 +52,7 @@ class Robot {
       this.pos.y = this.pos.y + vel * delta_t * sin(theta)
     }
 
+    this.createRays()
   }
 
   check(walls) {
@@ -66,7 +76,8 @@ class Robot {
         stroke(255, 100)
         line(this.pos.x, this.pos.y, closest.x, closest.y)
         let relativeHeading = ray.dir.heading() - robot.heading()
-        measurements.push({r: minDist, theta: relativeHeading, point: closest})
+        relativeHeading = this.normalizeAngle(relativeHeading)
+        measurements.push({r: minDist, theta: relativeHeading, heading: this.dir.heading(), point: closest})
       }
     }
 
@@ -76,5 +87,13 @@ class Robot {
   heading() {
     return this.dir.heading()
   }
+
+  // normalize the angle in order to get only positive values
+  normalizeAngle(angle) {
+    while (angle < 0) {
+        angle += 2 * PI
+    }
+   return angle
+}
 
 }
