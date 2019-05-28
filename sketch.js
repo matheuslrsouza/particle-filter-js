@@ -4,7 +4,7 @@ let ray
 let walls
 let robot
 let particles
-let nParticles = 2000
+let nParticles = 4000
 
 function setup() {
 
@@ -12,7 +12,7 @@ function setup() {
   background(220)
 
   //robot = new Robot(createVector(random() * width, random() * height), 0)
-  robot = new Robot(createVector(100, 130), 0)
+  robot = new Robot(createVector(80, 130), 0)
   ray = new Ray(createVector(0, 0))
   walls = []
 
@@ -28,7 +28,7 @@ function setup() {
 
   particles = []
   for (let i = 0; i < nParticles; i++) {
-    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.0005)))
+    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.00005)))
   }
 
   //particles.push(new Particle(robot.pos.x, robot.pos.y + 0, robot.heading()))
@@ -37,7 +37,7 @@ function setup() {
   
 
   // frameRate(10)
-  // noLoop()
+  noLoop()
 
 
 }
@@ -46,8 +46,8 @@ let vel = 50
 let delta_t = 0.1
 let yaw_rate
 // x, y, theta
-let std_pos = [3, 3, 0.05]
-const std_landmark = [60, 60]
+let std_pos = [4, 4, 0.005]
+const std_landmark = [50, 50]
 
 
 function draw() {
@@ -56,7 +56,7 @@ function draw() {
 
   yaw_rate = 0.09
   // yaw_rate = 0
-  robot.show()
+  
   
   
   //draw the walls
@@ -79,6 +79,7 @@ function draw() {
   }
 
   robot.move(vel, delta_t, yaw_rate)
+  robot.show()
 
   //resample
   const maxW = Math.max.apply(null, weights)

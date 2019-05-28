@@ -11,7 +11,7 @@ class Robot {
 
   createRays() {
     this.rays = []
-    for (let i = -60; i <= 60; i+=4) {
+    for (let i = -90; i <= 90; i+=4) {
       let angle = this.normalizeAngle(this.dir.heading() + radians(i))
       this.rays.push(new Ray(this.pos, p5.Vector.fromAngle(angle)))
     }

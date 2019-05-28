@@ -22,7 +22,7 @@ class Particle {
         if (window['DEBUG']) {
             push()
             translate(this.pos.x, this.pos.y)
-            fill(0, 255, 0)
+            fill(0, 255, 0, 20)
     
             let triangleSize = 15
             rotate(this.dir.heading())
