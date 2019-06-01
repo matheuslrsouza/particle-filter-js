@@ -4,15 +4,15 @@ let ray
 let walls
 let robot
 let particles
-let nParticles = 4000
+let nParticles = 1500
 
 function setup() {
 
   createCanvas(600, 400)
   background(220)
 
-  //robot = new Robot(createVector(random() * width, random() * height), 0)
-  robot = new Robot(createVector(80, 130), 0)
+  robot = new Robot(createVector(random() * width, random() * height), 0)
+  // robot = new Robot(createVector(460, 300), 0)
   ray = new Ray(createVector(0, 0))
   walls = []
 
@@ -28,7 +28,7 @@ function setup() {
 
   particles = []
   for (let i = 0; i < nParticles; i++) {
-    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.00005)))
+    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.1)))
   }
 
   //particles.push(new Particle(robot.pos.x, robot.pos.y + 0, robot.heading()))
@@ -36,18 +36,19 @@ function setup() {
   //particles.push(new Particle(robot.pos.x, robot.pos.y + 200, robot.heading()))
   
 
-  // frameRate(10)
-  noLoop()
+  // frameRate(1)
+  // noLoop()
 
 
 }
 
-let vel = 50
+let vel = 20
 let delta_t = 0.1
 let yaw_rate
 // x, y, theta
-let std_pos = [4, 4, 0.005]
-const std_landmark = [50, 50]
+let std_pos_robot = [0.9, 0.9, 10]
+let std_pos_particle = [2, 2, 10]
+const std_landmark = [15, 15]
 
 
 function draw() {
@@ -71,15 +72,16 @@ function draw() {
 
   for (particle of particles) {
     particle.check(walls, measurements)
-    particle.predict(delta_t, std_pos, vel, yaw_rate)
+    particle.predict(delta_t, std_pos_particle, vel, yaw_rate)
     particle.show()
 
     weights.push(particle.updateWeights(measurements, std_landmark))
 
   }
 
-  robot.move(vel, delta_t, yaw_rate)
   robot.show()
+  robot.move(vel, std_pos_robot, delta_t, yaw_rate)
+  
 
   //resample
   const maxW = Math.max.apply(null, weights)

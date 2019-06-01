@@ -11,7 +11,7 @@ class Robot {
 
   createRays() {
     this.rays = []
-    for (let i = -90; i <= 90; i+=4) {
+    for (let i = 0; i <= 360; i+=15) {
       let angle = this.normalizeAngle(this.dir.heading() + radians(i))
       this.rays.push(new Ray(this.pos, p5.Vector.fromAngle(angle)))
     }
@@ -22,7 +22,8 @@ class Robot {
   }
 
   show() {
-    push()    
+    push()
+    fill(255, 255, 255)
     translate(this.pos.x, this.pos.y)
     circle(0, 0, this.size)
 
@@ -41,7 +42,7 @@ class Robot {
     }
   }
 
-  move(vel, delta_t, yaw_rate) {
+  move(vel, std_pos, delta_t, yaw_rate) {
     let theta = this.dir.heading()  
     if (yaw_rate > 0.0001 || yaw_rate < -0.0001) {
       this.pos.x = this.pos.x + (vel / yaw_rate) * (sin(theta + yaw_rate * delta_t) - sin(theta));
@@ -51,6 +52,11 @@ class Robot {
       this.pos.x = this.pos.x + vel * delta_t * cos(theta)
       this.pos.y = this.pos.y + vel * delta_t * sin(theta)
     }
+
+    this.pos.x = randomGaussian(this.pos.x, std_pos[0])
+    this.pos.y = randomGaussian(this.pos.y, std_pos[1])
+    let new_angle = degrees(this.dir.heading())
+    this.dir = p5.Vector.fromAngle(radians(randomGaussian(new_angle, std_pos[3])))
 
     this.createRays()
   }

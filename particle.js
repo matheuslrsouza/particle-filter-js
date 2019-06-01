@@ -45,7 +45,8 @@ class Particle {
 
         this.pos.x = randomGaussian(this.pos.x, std_pos[0])
         this.pos.y = randomGaussian(this.pos.y, std_pos[1])
-        this.dir = p5.Vector.fromAngle(randomGaussian(this.dir.heading(), std_pos[3]))
+        let new_angle = degrees(this.dir.heading())
+        this.dir = p5.Vector.fromAngle(radians(randomGaussian(new_angle, std_pos[3])))
 
         this.normalizeAngle()
     }
