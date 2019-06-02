@@ -4,7 +4,7 @@ let ray
 let walls
 let robot
 let particles
-let nParticles = 1500
+let nParticles = 2000
 
 function setup() {
 
@@ -12,7 +12,7 @@ function setup() {
   background(220)
 
   robot = new Robot(createVector(random() * width, random() * height), 0)
-  // robot = new Robot(createVector(460, 300), 0)
+  // robot = new Robot(createVector(330, 150), 0)
   ray = new Ray(createVector(0, 0))
   walls = []
 
@@ -47,8 +47,8 @@ let delta_t = 0.1
 let yaw_rate
 // x, y, theta
 let std_pos_robot = [0.9, 0.9, 10]
-let std_pos_particle = [2, 2, 10]
-const std_landmark = [15, 15]
+let std_pos_particle = [3, 3, 10]
+const std_landmark = [30, 30]
 
 
 function draw() {
