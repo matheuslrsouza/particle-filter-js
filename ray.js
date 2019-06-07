@@ -5,15 +5,6 @@ class Ray {
     this.dir = dir
   }
 
-  show() {
-    push()
-    translate(this.pos.x, this.pos.y)
-    stroke(255);
-    line(0, 0, this.dir.x * 10, this.dir.y * 10)
-    pop()
-
-  }
-
   intersects(wall) {
     let x1 = wall.a.x
     let y1 = wall.a.y

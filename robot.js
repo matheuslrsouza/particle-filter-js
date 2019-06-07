@@ -15,10 +15,6 @@ class Robot {
       let angle = this.normalizeAngle(this.dir.heading() + radians(i))
       this.rays.push(new Ray(this.pos, p5.Vector.fromAngle(angle)))
     }
-
-    // console.log(this.dir.heading() )
-    // let rad = this.dir.heading() + PI/2
-    // this.rays.push(new Ray(this.pos, createVector(cos(rad), sin(rad))))
   }
 
   show() {
@@ -34,12 +30,6 @@ class Robot {
     triangle(0, arrowSize / 2, 0, -arrowSize / 2, arrowSize, 0);
 
     pop()
-    
-    for (ray of this.rays) {
-      ray.pos.x = this.pos.x
-      ray.pos.y = this.pos.y     
-      ray.show()
-    }
   }
 
   move(vel, std_pos, delta_t, yaw_rate) {
@@ -65,7 +55,7 @@ class Robot {
 
     let measurements = []
 
-    for (ray of this.rays) {
+    for (let ray of this.rays) {
       let closest
       let minDist = Infinity
       for (wall of walls) {
@@ -79,8 +69,10 @@ class Robot {
         }
       }
       if (closest) {
+        //draw the ray to the wall
         stroke(255, 100)
         line(this.pos.x, this.pos.y, closest.x, closest.y)
+
         let relativeHeading = ray.dir.heading() - robot.heading()
         relativeHeading = this.normalizeAngle(relativeHeading)
         measurements.push({r: minDist, theta: relativeHeading, heading: this.dir.heading(), point: closest})
