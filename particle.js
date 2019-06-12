@@ -1,4 +1,3 @@
-
 class Particle {
 
     constructor(x, y, angle) {
@@ -21,8 +20,9 @@ class Particle {
     show() {
         if (window['DEBUG']) {
             push()
+            stroke(255, 80)
+            fill(0, 255, 0, 80)
             translate(this.pos.x, this.pos.y)
-            fill(0, 255, 0, 20)
     
             let triangleSize = 15
             rotate(this.dir.heading())
@@ -33,6 +33,12 @@ class Particle {
     }
 
     predict(delta_t, std_pos, vel, yaw_rate) {
+        if (yaw_rate > maxSteerAngle) {
+            yaw_rate = maxSteerAngle
+        } else if (yaw_rate < -maxSteerAngle) {
+            yaw_rate = -maxSteerAngle
+        }
+
         let theta = this.dir.heading()  
         if (yaw_rate > 0.0001 || yaw_rate < -0.0001) {
             this.pos.x = this.pos.x + (vel / yaw_rate) * (sin(theta + yaw_rate * delta_t) - sin(theta));
@@ -58,7 +64,6 @@ class Particle {
         // console.log('--- ini --- ')
 
         // para cada observação do robo, verificamos:
-        //for (let rMeasurement of robotMeasurements) {
         for (let measurement of this.measurements) {
             let rMeasurement = measurement.rMeasurement
             let pMeasurement = measurement.pMeasurement

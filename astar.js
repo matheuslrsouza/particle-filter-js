@@ -23,7 +23,6 @@ class AStar {
 
         this.cost = width / this.grid.length * 2
         this.cost = 20
-        console.log('cost', this.cost)
 
         this.closed = []
         for (let i = 0; i < grid.length; i++) {

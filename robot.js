@@ -1,11 +1,11 @@
 class Robot {
-
   
   constructor(pos, angle) {
     this.size = 30
     this.dir = p5.Vector.fromAngle(angle)
     this.dir.normalize()    
     this.pos = pos
+    this.measurements = []
     this.createRays()
   }
 
@@ -30,30 +30,50 @@ class Robot {
     triangle(0, arrowSize / 2, 0, -arrowSize / 2, arrowSize, 0);
 
     pop()
+    
+    //draw measurements
+    push()
+    stroke(255, 100)
+    for (let m of this.measurements) {
+      line(this.pos.x, this.pos.y, m.point.x, m.point.y)
+    }    
+    pop()
   }
 
   move(vel, std_pos, delta_t, yaw_rate) {
     let theta = this.dir.heading()  
-    if (yaw_rate > 0.0001 || yaw_rate < -0.0001) {
+
+    
+    if (yaw_rate > maxSteerAngle) {
+      yaw_rate = maxSteerAngle
+    } else if (yaw_rate < -maxSteerAngle) {
+      yaw_rate = -maxSteerAngle
+    }
+    
+    if (yaw_rate > 0.001 || yaw_rate < -0.001) {
       this.pos.x = this.pos.x + (vel / yaw_rate) * (sin(theta + yaw_rate * delta_t) - sin(theta));
       this.pos.y = this.pos.y + (vel / yaw_rate) * (cos(theta) - cos(theta + yaw_rate * delta_t));
-      this.dir = p5.Vector.fromAngle(theta + yaw_rate * delta_t);
+      this.dir = p5.Vector.fromAngle(this.normalizeAngle(theta + yaw_rate * delta_t));
     } else {
       this.pos.x = this.pos.x + vel * delta_t * cos(theta)
       this.pos.y = this.pos.y + vel * delta_t * sin(theta)
     }
+    
+    if (std_pos !== undefined) {
+      this.pos.x = randomGaussian(this.pos.x, std_pos[0])
+      this.pos.y = randomGaussian(this.pos.y, std_pos[1])
+      let new_deegre = degrees(this.dir.heading())
+      let new_radian = this.normalizeAngle(radians(randomGaussian(new_deegre, std_pos[3])))
+      this.dir = p5.Vector.fromAngle(new_radian)
+    }
 
-    this.pos.x = randomGaussian(this.pos.x, std_pos[0])
-    this.pos.y = randomGaussian(this.pos.y, std_pos[1])
-    let new_angle = degrees(this.dir.heading())
-    this.dir = p5.Vector.fromAngle(radians(randomGaussian(new_angle, std_pos[3])))
 
     this.createRays()
   }
 
   check(walls) {
 
-    let measurements = []
+    this.measurements = []
 
     for (let ray of this.rays) {
       let closest
@@ -69,17 +89,13 @@ class Robot {
         }
       }
       if (closest) {
-        //draw the ray to the wall
-        stroke(255, 100)
-        line(this.pos.x, this.pos.y, closest.x, closest.y)
-
         let relativeHeading = ray.dir.heading() - robot.heading()
         relativeHeading = this.normalizeAngle(relativeHeading)
-        measurements.push({r: minDist, theta: relativeHeading, heading: this.dir.heading(), point: closest})
+        this.measurements.push({r: minDist, theta: relativeHeading, heading: this.dir.heading(), point: closest})
       }
     }
 
-    return measurements
+    return this.measurements
   }
 
   heading() {

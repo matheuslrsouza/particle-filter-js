@@ -13,10 +13,10 @@ class Smooth {
 
         let tolerance = 0.000001
         let change = tolerance
-        let alfa = 0.9
-        let beta = 0.5
+        let alfa = 0.1
+        let beta = 0.4
 
-        let stepLength = 3
+        let stepLength = 1
 
         while (change >= tolerance) {
             change = 0
@@ -31,12 +31,27 @@ class Smooth {
                 this.newpath[i][1] += alfa * (this.path[i][1] - this.newpath[i][1]) + 
                     beta * (this.newpath[i + stepLength][1] + this.newpath[i - stepLength][1] - 2 * this.newpath[i][1])
 
+                if (i >= 2) {
+                    this.newpath[i][0] += 0.5 * beta *
+                        (2.0 * this.newpath[i-1][0] - this.newpath[i-2][0] 
+                         - this.newpath[i][0])
+                    this.newpath[i][1] += 0.5 * beta *
+                         (2.0 * this.newpath[i-1][1] - this.newpath[i-2][1]
+                          - this.newpath[i][1])
+                }
+
+                if (i <= this.path.len - 4) {
+                    this.newpath[i][0] += 0.5 * beta *
+                        (2.0 * this.newpath[i+2][0] - this.newpath[i+3][0] 
+                         - this.newpath[i][0])
+                    this.newpath[i][1] += 0.5 * beta *
+                         (2.0 * this.newpath[i+2][1] - this.newpath[i+3][1]
+                          - this.newpath[i][1])
+                }
                 change += abs(oldX - this.newpath[i][0]) + abs(oldY - this.newpath[i][1])
             }            
 
         }
-
-        console.log(this.newpath)
     }
 
 }
