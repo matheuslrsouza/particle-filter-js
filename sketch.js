@@ -1,8 +1,17 @@
-window['DEBUG'] = true
-const maxSteerAngle = Math.PI
+window['DEBUG'] = false
+
+let vel = 10
+let delta_t = 0.1
+let yaw_rate
+// x, y, theta
+let std_pos_robot = [0.05, 0.05, 0.01]
+let std_pos_particle = [1, 1, 5]
+const std_landmark = [30, 30]
+
+const maxSteerAngle = Math.PI / 2
 let walls
 let robot
-let particles
+let filter
 let nParticles = 500
 
 //a* algorithm
@@ -18,8 +27,8 @@ let smooth
 let pid
 
 function setup() {
-  // goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
-  goal = [24, 31]
+  goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
+  // goal = [24, 31]
   console.log(goal)
 
   createCanvas(600, 400)
@@ -39,16 +48,6 @@ function setup() {
   walls.push(new Wall(createVector(0, 0), createVector(width, 0)))
   walls.push(new Wall(createVector(width, 0), createVector(width, height)))
   walls.push(new Wall(createVector(0, height), createVector(width, height)))
-
-  particles = []
-  for (let i = 0; i < nParticles; i++) {
-    particles.push(new Particle(random() * width, random() * height, randomGaussian(robot.heading(), 0.1)))
-  }
-
-  // particles.push(new Particle(robot.pos.x, robot.pos.y + 5, robot.heading()))
-  // particles.push(new Particle(robot.pos.x, robot.pos.y + 100, randomGaussian(robot.heading(), 0.1)))
-  // particles.push(new Particle(600, 0, robot.heading()))
-  
 
   // create a grid and check if there is wall on map
   // complexity -> length of grid * number of walls
@@ -92,7 +91,8 @@ function setup() {
 
   }
 
-  // modify in future to particle position
+  filter = new ParticleFilter(nParticles, robot)
+
   let i = min(parseInt(robot.pos.x / (width / n_rows)), n_rows - 1)
   let j = min(parseInt(robot.pos.y / (height / n_cols)), n_cols - 1)
   start = [i, j]
@@ -108,10 +108,11 @@ function setup() {
     path.push([step.x, step.y])
   }
 
-  smooth = new Smooth(path.reverse())
+  smooth = new Smooth(path.reverse(), grid)
   smooth.calculate()
 
-  twiddle()
+  // twiddle()
+  pid = new PID(smooth.newpath, [20.669822917749723, 3.57662533911338, 0.6665368008263248])
   
   // frameRate(1)
   noLoop()
@@ -169,8 +170,6 @@ function twiddle() {
     
   }
 
-  console.log(it, bestErr, p)
-
   pid = new PID(smooth.newpath, p)
 
 }
@@ -193,15 +192,6 @@ function run(r, n, p) {
   return err / n
 }
 
-let vel = 10
-let delta_t = 0.1
-let yaw_rate
-// x, y, theta
-let std_pos_robot = [0.05, 0.05, 0.01]
-//let std_pos_particle = [3, 3, 10]
-const std_landmark = [30, 30]
-
-
 function draw() {
 
   background(0)
@@ -216,7 +206,8 @@ function draw() {
         fill(0, 0, 255)
       } else if (content == 3) { //path (temp)
         fill(255, 0, 102)
-      }/* else if (content == 4) { //touched (temp)
+      }/* else if (content == 5) { //touched (temp)
+        console.log('>>>>>>>')
         fill(255, 51, 0)
       }*/ else {
         noFill()
@@ -241,10 +232,11 @@ function draw() {
 
   robot.show()
   
-  for (particle of particles) {
+  for (particle of filter.particles) {
     particle.show()
   }
 
+  filter.show()
 
 }
 
@@ -263,73 +255,26 @@ function mousePressed() {
     const weights = []
 
     let measurements = robot.check(walls)
-    for (particle of particles) {
-      particle.check(walls, measurements)
-      weights.push(particle.updateWeights(measurements, std_landmark))
-    }
-
+    filter.updateWeights(measurements, walls, std_landmark)
+    
     robot.move(vel, std_pos_robot, delta_t, steer)
-    for (particle of particles) {
-      particle.predict(delta_t, std_pos_robot, vel, steer)
-    }
+    filter.predict(delta_t, std_pos_particle, vel, steer)
     
     //resample
-    const maxW = Math.max.apply(null, weights)
-    let beta = 0.0
-    const N = weights.length
-    let index = parseInt(random() * N)
+    filter.resample()    
 
-    let selectedParticles = []
-
-    let meanX = 0
-    let meanY = 0
-
-    let sigmaX = 0
-    let sigmaY = 0
-    
-    for (let i = 0; i < N; i++) {
-      beta += random() * 2.0 * maxW
-      while (beta > weights[index]) {
-        beta -= weights[index]
-        index = (index + 1) % N
-      }
-      const p = particles[index]
-      selectedParticles.push(new Particle(p.pos.x, p.pos.y, p.dir.heading()))
-      
-      //debug
-      meanX += p.pos.x / N
-      meanY += p.pos.y / N
-      
-      let sigmaSquareX = Math.pow(p.pos.x - meanX, 2)
-      let sigmaSquareY = Math.pow(p.pos.y - meanY, 2)
-
-      sigmaX += sigmaSquareX
-      sigmaY += sigmaSquareY
-    }
-
-    particles = selectedParticles
-
-    let steerDegree = pid.getSteer([robot.pos.x, robot.pos.y])
+    let steerDegree = pid.getSteer([filter.particlePosX(), filter.particlePosY()])
     steer = radians(steerDegree)
     console.log('steer', ++i, steerDegree, steer  % 2 * PI)
     
-    let dist = Math.sqrt(Math.pow(goal[0] - meanX, 2) + Math.pow(goal[1] - meanY, 2))
+    let dist = Math.sqrt(
+      Math.pow(goal[0] - filter.particlePosX(), 2) + Math.pow(goal[1] - filter.particlePosY(), 2))
     if (dist <= 20) {
       alert('chegou')
       clearInterval(interval)
     } else {
       redraw()
     }
-
-    // //debug
-    let stddevX = Math.sqrt(sigmaX * (1 / N))
-    let stddevY = Math.sqrt(sigmaY * (1 / N))
-
-    push()
-    fill(0, 0, 255, 20)
-    ellipse(meanX, meanY, Math.log(stddevX) * 8, Math.log(stddevY) * 8)
-    pop()
-    
-  }, 10)
+  }, 1)
 }
 
