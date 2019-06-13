@@ -50,7 +50,7 @@ class AStar {
             // count += 1
 
             if (this.open.length == 0) {
-                console.log('no solution!')
+                alert('no solution!')
                 break
             }
 
@@ -80,7 +80,34 @@ class AStar {
                     if (x2 >= 0 && x2 < nRows && y2 >= 0 && y2 < nCols) {
                         // is not closed and not blocked?
                         if (this.closed[x2][y2] == 0 && this.grid[x2][y2] == 0) {
-                            let g2 = next.g + this.cost
+
+                            // penalize if it is near some wall
+                            let deltaW = [
+                                [1, 0],
+                                [0, -1],
+                                [-1, 0],
+                                [0, 1],
+                                [-1, 1],
+                                [1, 1],
+                                [1, -1],
+                                [-1, -1]
+                            ]
+                            let costWall = 0
+
+                            for (let dt = 0; dt < deltaW.length; dt++) {
+                                let xW = x2 + deltaW[dt][0]
+                                let yW = y2 + deltaW[dt][1]
+
+                                // is inner the matrix?
+                                if (xW >= 0 && xW < nRows && yW >= 0 && yW < nCols) {
+                                    if (this.grid[xW][yW] == 1) {
+                                        costWall += 50
+                                    }
+                                }
+                            }
+                            // end of penalize
+
+                            let g2 = next.g + this.cost + costWall
                             // euclidean distance without sqrt to maximize the number
                             // in adjacents cells
                             let h2 = 
