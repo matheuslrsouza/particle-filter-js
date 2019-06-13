@@ -18,18 +18,19 @@ class Particle {
     }
 
     show() {
+        push()
+        translate(this.pos.x, this.pos.y)
+        rotate(this.dir.heading())
+
         if (window['DEBUG']) {
-            push()
             stroke(255, 80)
             fill(0, 255, 0, 80)
-            translate(this.pos.x, this.pos.y)
     
             let triangleSize = 15
-            rotate(this.dir.heading())
-            triangle(0, triangleSize / 4, 0, -triangleSize / 4, triangleSize, 0)
-            
-            pop()
+            triangle(0, triangleSize / 4, 0, -triangleSize / 4, triangleSize, 0)            
         }
+
+        pop()
     }
 
     predict(delta_t, std_pos, vel, yaw_rate) {
