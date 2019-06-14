@@ -28,7 +28,7 @@ let pid
 
 function setup() {
   // goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
-  goal = [10, 30]
+  goal = [20, 30]
   console.log(goal)
 
   createCanvas(600, 400)
@@ -253,10 +253,7 @@ function mousePressed() {
   let i = 0
 
   let interval = setInterval(function() {
-    
-    //temp melhorar para filter
-    const weights = []
-
+    console.log(mouseX, mouseY)
     let measurements = robot.check(walls)
     filter.updateWeights(measurements, walls, std_landmark)
     
