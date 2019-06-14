@@ -1,4 +1,4 @@
-window['DEBUG'] = false
+window['DEBUG'] = true
 
 let vel = 10
 let delta_t = 0.1
@@ -27,8 +27,8 @@ let smooth
 let pid
 
 function setup() {
-  goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
-  // goal = [24, 31]
+  // goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
+  goal = [10, 30]
   console.log(goal)
 
   createCanvas(600, 400)
@@ -112,7 +112,7 @@ function setup() {
   smooth.calculate()
 
   // twiddle()
-  pid = new PID(smooth.newpath, [20.669822917749723, 3.57662533911338, 0.6665368008263248])
+  pid = new PID(smooth.newpath, [22.715382451985896, 4.408941742236364, 0.6665248811689148])
   
   // frameRate(1)
   noLoop()
@@ -125,7 +125,7 @@ function initRobot() {
 function twiddle() {
   let tol = 0.0000001
   
-  let p = [0.0, 0.0, 0.0]
+  let p = [20.669822917749723, 3.57662533911338, 0.6665368008263248]
   let dp = [1.0, 1.0, 1.0]
 
   let newPid = new PID(smooth.newpath, p)
@@ -133,8 +133,6 @@ function twiddle() {
   let n = 500
   let r = initRobot()
   let bestErr = run(r, n, newPid)
-
-  console.log(p, dp, bestErr)
 
   let it = 0
   while (dp.reduce((acm, cur) => acm + cur) > tol) {
@@ -170,6 +168,7 @@ function twiddle() {
     
   }
 
+  console.log('best error: ', p, bestErr)
   pid = new PID(smooth.newpath, p)
 
 }
@@ -196,26 +195,30 @@ function draw() {
 
   background(0)
   
-  for (let i = 0; i < grid.length; i++) {
-    for (let j = 0; j < grid[0].length; j++) {
-      let content = grid[i][j]
-      push()
-      if (content == 1) {
-        fill(0, 255, 0)
-      } else if (content == 2) { //expanded (temp)
-        fill(0, 0, 255)
-      } else if (content == 3) { //path (temp)
-        fill(255, 0, 102)
-      }/* else if (content == 5) { //touched (temp)
-        console.log('>>>>>>>')
-        fill(255, 51, 0)
-      }*/ else {
-        noFill()
+  if (window['DEBUG']) {
+
+    for (let i = 0; i < grid.length; i++) {
+      for (let j = 0; j < grid[0].length; j++) {
+        let content = grid[i][j]
+        push()
+        if (content == 1) {
+          fill(0, 255, 0)
+        } else if (content == 2) { //expanded (temp)
+          fill(0, 0, 255)
+        } else if (content == 3) { //path (temp)
+          fill(255, 0, 102)
+        }/* else if (content == 5) { //touched (temp)
+          console.log('>>>>>>>')
+          fill(255, 51, 0)
+        }*/ else {
+          noFill()
+        }
+        stroke(255, 0, 0, 100)
+        rect(i * width / n_rows, j * height / n_cols, width / n_rows, height / n_cols)
+        pop()
       }
-      stroke(255, 0, 0, 100)
-      rect(i * width / n_rows, j * height / n_cols, width / n_rows, height / n_cols)
-      pop()
     }
+
   }
 
   for (let i = 0; i < smooth.newpath.length; i++) {
@@ -270,7 +273,7 @@ function mousePressed() {
     let dist = Math.sqrt(
       Math.pow(goal[0] - filter.particlePosX(), 2) + Math.pow(goal[1] - filter.particlePosY(), 2))
     if (dist <= 20) {
-      alert('chegou')
+      //alert('chegou')
       clearInterval(interval)
     } else {
       redraw()
