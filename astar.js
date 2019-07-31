@@ -50,8 +50,8 @@ class AStar {
             // count += 1
 
             if (this.open.length == 0) {
-                alert('no solution!')
-                break
+                // thre is no solution to this path
+                return false
             }
 
             this.open.sort((a, b) => {
@@ -126,16 +126,10 @@ class AStar {
                             cell.previous = next
                         }
                     }
-
                 }
-
-
             }
-                
-            
-
         }
-
+        return true
     }
 
 

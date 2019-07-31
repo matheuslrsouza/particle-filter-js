@@ -17,7 +17,7 @@ let nParticles = 500
 //a* algorithm
 let n_rows = 50
 let n_cols = 50
-let grid = []
+let grid
 
 let start
 let goal
@@ -26,15 +26,35 @@ let smooth
 
 let pid
 
-function setup() {
-  // goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
-  goal = [20, 30]
-  console.log(goal)
+let interval = undefined
 
+function setup() {  
   createCanvas(600, 400)
+  noLoop()
+
+  var btnReset = createButton("Reset")
+  btnReset.position(20, height + 60);
+  btnReset.mousePressed(doSetup)
+
+  checkbox = createCheckbox('Debug Version?', true);
+  checkbox.position(100, height + 60);
+  checkbox.changed(function() {
+    DEBUG = this.checked()
+    doSetup()
+  });
+
+  var info = createDiv('<b>Shift</b> click to tell robot to follow the path </br>')
+    .html('<a href="https://github.com/matheuslrsouza/particle-filter-js">source code</a>', true);
+  info.position(20, height + 10)
+
+  doSetup()  
+}
+
+function doSetup() {
   background(220)
 
-  // robot = new Robot(createVector(random() * width, random() * height), 0)
+  goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
+  
   robot = new Robot(createVector(100, 50), PI / 2)
   
   walls = []
@@ -48,9 +68,10 @@ function setup() {
   walls.push(new Wall(createVector(0, 0), createVector(width, 0)))
   walls.push(new Wall(createVector(width, 0), createVector(width, height)))
   walls.push(new Wall(createVector(0, height), createVector(width, height)))
-
+  
   // create a grid and check if there is wall on map
   // complexity -> length of grid * number of walls
+  grid = []
   for (let row = 0; row < n_rows; row++) {
     let rowdata = []
     for (let col = 0; col < n_cols; col++) {
@@ -98,24 +119,25 @@ function setup() {
   start = [i, j]
 
   let astar = new AStar(grid, start, goal)
-  astar.findPath()
+  if (astar.findPath()) { // has path
+    let path = []
+    let step = astar.goal
+    while (step.previous) {
+      step = step.previous
+      grid[step.x][step.y] = 3
+      path.push([step.x, step.y])
+    }
 
-  let path = []
-  let step = astar.goal  
-  while (step.previous) {
-    step = step.previous
-    grid[step.x][step.y] = 3
-    path.push([step.x, step.y])
+    smooth = new Smooth(path.reverse(), grid)
+    smooth.calculate()
+
+    // twiddle()
+    pid = new PID(smooth.newpath, [22.715382451985896, 4.408941742236364, 0.6665248811689148])
+  } else { // there is no path
+    alert('there is no path, trying with another goal')
+    doSetup()
   }
-
-  smooth = new Smooth(path.reverse(), grid)
-  smooth.calculate()
-
-  // twiddle()
-  pid = new PID(smooth.newpath, [22.715382451985896, 4.408941742236364, 0.6665248811689148])
-  
-  // frameRate(1)
-  noLoop()
+  redraw()
 }
 
 function initRobot() {
@@ -194,7 +216,7 @@ function run(r, n, p) {
 function draw() {
 
   background(0)
-  
+
   if (window['DEBUG']) {
 
     for (let i = 0; i < grid.length; i++) {
@@ -241,9 +263,31 @@ function draw() {
 
   filter.show()
 
+  // show a flag on the goal
+  push()
+  beginShape()
+  strokeWeight(4);
+  stroke(255);
+  let px = smooth.newpath[smooth.newpath.length - 1][0] * width / n_rows;
+  let py = smooth.newpath[smooth.newpath.length - 1][1] * height / n_cols;
+  vertex(px, py)
+  vertex(px, py - 30)
+  vertex(px + 20, py - 25)
+  vertex(px, py - 15)
+  endShape()
+  pop() 
+
 }
 
-function mousePressed() {
+
+
+function keyPressed() {
+  // must be shift to start the robot 
+  // and the robot must not be in the middle of the path
+  if (keyCode !== SHIFT || interval !== undefined) {
+    console.log('skipping')
+    return
+  }
 
   let steer = 0.0
   let lastIndexPath = smooth.newpath.length - 1
@@ -252,7 +296,7 @@ function mousePressed() {
   let goal = [xGoal, yGoal]
   let i = 0
 
-  let interval = setInterval(function() {
+  interval = setInterval(function() {
     console.log(mouseX, mouseY)
     let measurements = robot.check(walls)
     filter.updateWeights(measurements, walls, std_landmark)
@@ -272,6 +316,7 @@ function mousePressed() {
     if (dist <= 20) {
       //alert('chegou')
       clearInterval(interval)
+      interval = undefined
     } else {
       redraw()
     }
