@@ -6,11 +6,14 @@ This project simulates an environment for a Robot, using Localization, Path Plan
 * A* 
 * Smooth path
 * PID controller
-* Raycasting
 
 In order to simulate the sensors I used Raycasting, based in the Daniel Shiffman <a href="https://www.youtube.com/watch?v=TOEi6T2mtHo&t=709s">Youtube Video</a>
 
 ## Demonstration
+
+### Demo Page
+
+https://matheuslrsouza.github.io/particle-filter-js/
 
 ### Non debug
 
