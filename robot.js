@@ -31,12 +31,15 @@ class Robot {
 
     pop()
     
-    //draw measurements
+    //draw measurements (rays)
     push()
-    stroke(255, 100)
-    for (let m of this.measurements) {
+    for (let m of this.measurements) {      
+      stroke(255, 100)
       line(this.pos.x, this.pos.y, m.point.x, m.point.y)
-    }    
+      stroke(0, 200, 0, 220)
+      fill(0, 200, 0, 220)
+      circle(m.point.x, m.point.y, 7)
+    }
     pop()
   }
 

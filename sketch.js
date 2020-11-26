@@ -1,10 +1,10 @@
-window['DEBUG'] = true
+window['DEBUG'] = false
 
 let vel = 10
 let delta_t = 0.1
 let yaw_rate
 // x, y, theta
-let std_pos_robot = [0.05, 0.05, 0.01]
+let std_pos_robot = [0.005, 0.005, 0.001]
 let std_pos_particle = [1, 1, 5]
 const std_landmark = [30, 30]
 
@@ -32,12 +32,16 @@ function setup() {
   createCanvas(600, 400)
   noLoop()
 
+  const offsetW = 500;
+  const offsetH = 100;
+
   var btnReset = createButton("Reset")
-  btnReset.position(20, height + 60);
+  btnReset.position(offsetW + 20, offsetH + height + 60);
   btnReset.mousePressed(doSetup)
 
-  checkbox = createCheckbox('Debug Version?', true);
-  checkbox.position(100, height + 60);
+  checkbox = createCheckbox('Debug Version?', DEBUG);
+  checkbox.position(offsetW + 100, offsetH + height + 60);
+  checkbox.style('color', 'white');
   checkbox.changed(function() {
     DEBUG = this.checked()
     doSetup()
@@ -45,13 +49,18 @@ function setup() {
 
   var info = createDiv('<b>Shift</b> click to tell robot to follow the path </br>')
     .html('<a href="https://github.com/matheuslrsouza/particle-filter-js">source code</a>', true);
-  info.position(20, height + 10)
+  info.style('color', 'white');
+  info.position(offsetW + 20, offsetH + height + 10)
+  
 
   doSetup()  
 }
 
 function doSetup() {
   background(220)
+
+  clearInterval(interval)
+  interval = undefined
 
   goal = [parseInt(random() * n_rows), parseInt(random() * n_cols)]
   
@@ -134,7 +143,7 @@ function doSetup() {
     // twiddle()
     pid = new PID(smooth.newpath, [22.715382451985896, 4.408941742236364, 0.6665248811689148])
   } else { // there is no path
-    alert('there is no path, trying with another goal')
+    console.log('there is no path, trying with another goal')
     doSetup()
   }
   redraw()
@@ -279,8 +288,6 @@ function draw() {
 
 }
 
-
-
 function keyPressed() {
   // must be shift to start the robot 
   // and the robot must not be in the middle of the path
@@ -297,7 +304,6 @@ function keyPressed() {
   let i = 0
 
   interval = setInterval(function() {
-    console.log(mouseX, mouseY)
     let measurements = robot.check(walls)
     filter.updateWeights(measurements, walls, std_landmark)
     
@@ -309,7 +315,6 @@ function keyPressed() {
 
     let steerDegree = pid.getSteer([filter.particlePosX(), filter.particlePosY()])
     steer = radians(steerDegree)
-    console.log('steer', ++i, steerDegree, steer  % 2 * PI)
     
     let dist = Math.sqrt(
       Math.pow(goal[0] - filter.particlePosX(), 2) + Math.pow(goal[1] - filter.particlePosY(), 2))
