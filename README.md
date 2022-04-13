@@ -13,7 +13,7 @@ In order to simulate the sensors I used Raycasting, based in the Daniel Shiffman
 
 ### Demo Page
 
-https://matheuslrsouza.github.io/particle-filter-js/
+https://CodeFish05.github.io/particle-filter-js/
 
 ### Non debug
 
