@@ -288,10 +288,10 @@ function draw() {
 
 }
 
-function keyPressed() {
+function mousePressed() {
   // must be shift to start the robot 
   // and the robot must not be in the middle of the path
-  if (keyCode !== SHIFT || interval !== undefined) {
+  if (interval !== undefined) {
     console.log('skipping')
     return
   }
