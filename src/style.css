@@ -1,0 +1,45 @@
+:root {
+  --bg: #0b0f16;
+  --fg: #e6edf3;
+  --muted: #8b98a9;
+  --panel: rgba(13, 18, 27, 0.78);
+  --accent: #39ff88;
+  --magenta: #ff2e88;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+#app, #app canvas { position: fixed; inset: 0; display: block; }
+#hud { position: fixed; inset: 0; pointer-events: none; }
+#hud > * { pointer-events: auto; }
+header {
+  position: absolute; top: 16px; left: 16px; max-width: min(420px, calc(100vw - 32px));
+  padding: 12px 16px; border-radius: 10px; background: var(--panel); backdrop-filter: blur(6px);
+}
+h1 { margin: 0 0 4px; font-size: 18px; letter-spacing: 0.02em; }
+h1 span { color: var(--accent); }
+#status { margin: 0 0 6px; color: var(--fg); font-variant-numeric: tabular-nums; }
+.hint { margin: 0; color: var(--muted); font-size: 12px; }
+#charts {
+  position: absolute; left: 16px; bottom: 16px; padding: 8px; border-radius: 10px; background: var(--panel);
+}
+#chart { display: block; width: 280px; height: 140px; }
+#toast {
+  position: absolute; top: 16px; left: 50%; transform: translate(-50%, -8px); opacity: 0;
+  padding: 8px 14px; border-radius: 8px; background: var(--magenta); color: #fff; font-weight: 600;
+  transition: opacity 0.25s, transform 0.25s; pointer-events: none; white-space: nowrap;
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+.source { position: absolute; right: 16px; bottom: 16px; color: var(--muted); font-size: 12px; }
+.lil-gui.root { --background-color: var(--panel); --width: 270px; }
+@media (max-width: 640px) {
+  header { top: 8px; left: 8px; }
+  #charts { display: none; }
+  #toast { top: auto; bottom: 48px; }
+}

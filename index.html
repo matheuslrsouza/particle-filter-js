@@ -1,36 +1,26 @@
-<html>
-
-<head>  
-  <script src="p5/p5.min.js"></script>
-  <script src="p5/addons/p5.dom.min.js"></script>
-</head>
-
-<body>
-  <script src="map.js"></script>
-  <script src="wall.js"></script>
-  <script src="ray.js"></script>
-  <script src="robot.js"></script>
-  <script src="particlefilter.js"></script>
-  <script src="particle.js"></script>
-  <script src="astar.js"></script>
-  <script src="smooth.js"></script>
-  <script src="pid.js"></script>
-  <script src="sketch.js"></script>
-</body>
-<style>
-  html,
-  body {
-    margin: 0;
-    padding: 0;
-    background-color: #000;
-    overflow: hidden;
-  }
-  canvas {    
-    margin-left: 500;
-    margin-top: 100;
-  }
-</style>
-
-
-
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Robot JS 3D</title>
+    <link rel="icon" href="data:," />
+    <meta name="description" content="Particle filter localization, A* planning, path smoothing and PID control of a little car, in 3D." />
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">
+      <header>
+        <h1>Robot JS <span>3D</span></h1>
+        <p id="status"></p>
+        <p class="hint"><b>Click</b> the floor to set a goal · <b>drag</b> to orbit · <b>scroll</b> to zoom</p>
+      </header>
+      <section id="charts">
+        <canvas id="chart" width="280" height="140"></canvas>
+      </section>
+      <div id="toast"></div>
+      <a class="source" href="https://github.com/matheuslrsouza/particle-filter-js">source code</a>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>
