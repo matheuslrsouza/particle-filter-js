@@ -1,33 +1,65 @@
-# Robot JS
+# Robot JS 3D
 
-This project simulates an environment for a Robot, using Localization, Path Planning, and Controller. The following topics were based on the free course of Udacity <a href="https://classroom.udacity.com/courses/cs373">Artificial Intelligence for Robotics</a>
+A little car drives through a maze using the classic robotics pipeline from Udacity's free course
+<a href="https://www.udacity.com/course/artificial-intelligence-for-robotics--cs373">Artificial Intelligence for Robotics</a> (CS373):
 
-* Particle filter
-* A* 
-* Smooth path
-* PID controller
+```
+lidar (raycasting) → particle filter → A* → path smoothing → PID → kinematic bicycle model
+```
 
-In order to simulate the sensors I used Raycasting, based in the Daniel Shiffman <a href="https://www.youtube.com/watch?v=TOEi6T2mtHo&t=709s">Youtube Video</a>
+The car never knows where it really is: it plans and steers using only the pose estimated by the particle filter.
 
-## Demonstration
+**Demo:** https://matheuslrsouza.github.io/particle-filter-js/
 
-### Demo Page
+## Using it
 
-https://matheuslrsouza.github.io/particle-filter-js/
+- **Click the floor** to set a goal. The A* expansion (blue), the raw path (magenta) and the smoothed path (white) are animated, then the car drives.
+- **Drag** to orbit, **scroll** to zoom. Switch to the *Chase* or *Top-down* camera in the panel.
+- **Kidnap robot** teleports the car without telling the filter. Watch random particles get injected until it finds the car again (augmented MCL).
+- **Forget position** spreads the particles over the whole map (global localization). It works better with more particles.
+- **Layers** turns each visualization on or off: particles, lidar, belief (green ghost car + 2σ ellipse), A*, paths, occupancy grid and trails.
+- **PID controller → Auto-tune (twiddle)** tunes the gains on the current path in a Web Worker.
+- The chart shows the cross-track error (CTE) and the localization error over the last 30 s.
 
-### Non debug
+## Running locally
 
-<img src="resources/small-nondebug-gif.gif">
+```bash
+npm install
+npm run dev      # http://localhost:5173/particle-filter-js/
+npm test         # unit tests of the simulation core
+npm run build
+```
 
-### Debug
+## Project structure
 
-<img src="resources/small-debug-gif.gif">
+```
+src/
+  core/            pure TypeScript simulation, no three.js (unit tested)
+    math/          angles, seedable RNG, vectors
+    world/         map loading, occupancy grid + clearance (distance to walls)
+    sensors/       lidar raycasting
+    vehicle/       kinematic bicycle model
+    localization/  particle filter (Monte Carlo localization)
+    planning/      A* (binary heap, 8-connected) and path smoothing
+    control/       PID path follower and twiddle
+    sim/           fixed-timestep simulation and state machine
+  render/          three.js scene, car, particles, lidar, plan, cameras
+  ui/              HUD, control panel, twiddle worker
+  maps/            maps in meters (JSON)
+```
 
-* Green cells are the walls in the grid
-* Blue are the expanded cells in A* algorithm in order to search the optimal path
-* Magenta is the path finded in the A*
-* White dots are the Smoothed Path
+## What changed from the 2D version
 
-### Particle Filter
+The original p5.js version (2020) is kept in the [`p5-js-2d`](../../tree/p5-js-2d) branch. Besides the move to 3D, these bugs were fixed:
 
-The green circle is the belief of where the robot is, the motion is done based in that belief
+- **PID**: the D and I terms were multiplied together instead of summed, so only P was really active.
+- **Particle filter**: the weights used the robot's *true* heading. The filter now compares the ranges beam by beam. Log-likelihoods avoid the underflow of multiplying 36 small Gaussians, and the heading is now estimated as well.
+- **Motion noise**: the heading noise read `std[3]` from a 3-element array, so the configured value was ignored.
+- **A\***: the squared Euclidean heuristic was not admissible, and the open list was re-sorted on every iteration.
+- **Smoothing**: one of the update terms never ran (`path.len`), and the smoothed path could cut through walls.
+- **Motion model**: the steering angle was used as a yaw rate. It is now a kinematic bicycle model with a steering-rate limit.
+
+## Credits
+
+- Course: Sebastian Thrun, Udacity CS373.
+- Raycasting was originally based on Daniel Shiffman's <a href="https://www.youtube.com/watch?v=TOEi6T2mtHo">Coding Challenge</a>.
