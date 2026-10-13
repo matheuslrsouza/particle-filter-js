@@ -11,6 +11,8 @@ export interface MapDef {
   width: number
   height: number
   start: Pose
+  /** suggested goal (exploration mode) */
+  goal?: Pose
   walls: [number, number, number, number][]
 }
 
@@ -19,6 +21,7 @@ export interface World {
   width: number
   height: number
   start: Pose
+  goal?: Pose
   /** interior walls plus the outer border */
   walls: Segment[]
 }
@@ -32,5 +35,5 @@ export function loadWorld(def: MapDef): World {
     { a: { x: w, y: h }, b: { x: 0, y: h } },
     { a: { x: 0, y: h }, b: { x: 0, y: 0 } },
   )
-  return { name: def.name, width: w, height: h, start: { ...def.start }, walls }
+  return { name: def.name, width: w, height: h, start: { ...def.start }, goal: def.goal && { ...def.goal }, walls }
 }

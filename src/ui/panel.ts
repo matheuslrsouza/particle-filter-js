@@ -2,6 +2,7 @@ import GUI from 'lil-gui'
 import type { PidGains } from '../core/control/pid'
 import { VEHICLE, type Simulation } from '../core/sim/simulation'
 import type { CameraMode } from '../render/cameras'
+import { addModeSelector } from './mode'
 
 export interface ViewState {
   paused: boolean
@@ -23,6 +24,7 @@ export function createPanel(sim: Simulation, view: ViewState, hooks: { onCamera:
   const gui = new GUI({ title: 'Controls' })
   if (window.innerWidth < 640) gui.close()
   const p = sim.params
+  addModeSelector(gui, 'known')
 
   const simF = gui.addFolder('Simulation')
   simF.add(view, 'paused').name('Pause')

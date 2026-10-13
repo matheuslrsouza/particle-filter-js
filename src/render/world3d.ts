@@ -34,7 +34,7 @@ function floorTexture(world: World): THREE.CanvasTexture {
   return tex
 }
 
-export function createWorld3d(world: World): { group: THREE.Group; floor: THREE.Mesh } {
+export function createWorld3d(world: World): { group: THREE.Group; floor: THREE.Mesh; walls: THREE.InstancedMesh } {
   const group = new THREE.Group()
 
   const floor = new THREE.Mesh(
@@ -79,7 +79,7 @@ export function createWorld3d(world: World): { group: THREE.Group; floor: THREE.
   walls.receiveShadow = true
   group.add(walls)
 
-  return { group, floor }
+  return { group, floor, walls }
 }
 
 /** Debug overlay of the occupancy grid used by A*: walls and inflated cells. */
