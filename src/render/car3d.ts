@@ -16,9 +16,7 @@ export class Car3d {
 
   constructor(wheelbase: number, ghost = false) {
     const mat = (color: number, extra: THREE.MeshStandardMaterialParameters = {}) =>
-      ghost
-        ? new THREE.MeshBasicMaterial({ color: COLORS.belief, transparent: true, opacity: 0.18, depthWrite: false })
-        : new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.2, ...extra })
+      ghost ? new THREE.MeshBasicMaterial() : new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.2, ...extra })
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.14, 0.4), mat(COLORS.car))
     body.position.set(wheelbase / 2, 0.16, 0)
@@ -59,9 +57,22 @@ export class Car3d {
       }
     }
 
-    this.group.traverse((o) => {
-      if (o instanceof THREE.Mesh) o.castShadow = !ghost
-    })
+    if (ghost) {
+      // the estimated pose is drawn as a green wireframe on top, readable even when it overlaps the real car
+      const edgeMat = new THREE.LineBasicMaterial({ color: COLORS.belief, transparent: true, opacity: 0.9, depthTest: false })
+      const meshes: THREE.Mesh[] = []
+      this.group.traverse((o) => o instanceof THREE.Mesh && meshes.push(o))
+      for (const m of meshes) {
+        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry, 30), edgeMat)
+        edges.renderOrder = 12
+        m.add(edges)
+        ;(m.material as THREE.Material).visible = false
+      }
+    } else {
+      this.group.traverse((o) => {
+        if (o instanceof THREE.Mesh) o.castShadow = true
+      })
+    }
   }
 
   update(pose: Pose, steer: number, odometer: number, dt: number): void {

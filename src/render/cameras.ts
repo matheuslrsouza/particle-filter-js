@@ -56,7 +56,8 @@ export class CameraRig {
     const wantPos = new THREE.Vector3(car.x, 1.6, car.y).addScaledVector(dir, -2.4)
     const wantLook = new THREE.Vector3(car.x, 0.2, car.y).addScaledVector(dir, 1.5)
     const k = 1 - Math.exp(-dt * 4)
-    if (this.chasePos.lengthSq() === 0) {
+    // first frame, or the car was teleported (reset / kidnap): jump instead of flying across the map
+    if (this.chasePos.lengthSq() === 0 || this.chasePos.distanceTo(wantPos) > 6) {
       this.chasePos.copy(wantPos)
       this.chaseLook.copy(wantLook)
     }

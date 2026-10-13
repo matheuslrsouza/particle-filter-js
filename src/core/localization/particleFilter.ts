@@ -130,8 +130,10 @@ export class ParticleFilter {
 
     // when every particle is equally bad the weights stay flat (high Neff), so a sudden
     // likelihood drop must also trigger a resample, otherwise nothing is ever injected
-    const injectProb = this.params.allowRecovery && this.wSlow > 0 ? Math.max(0, 1 - this.wFast / this.wSlow) * 0.3 : 0
-    if (this.estimate.neff < 0.5 || injectProb > 0.02) this.resample(injectProb)
+    // small dips are just sensor noise: only a real drop (> 15%) injects random particles
+    const drop = this.params.allowRecovery && this.wSlow > 0 ? 1 - this.wFast / this.wSlow : 0
+    const injectProb = drop > 0.15 ? drop * 0.3 : 0
+    if (this.estimate.neff < 0.5 || injectProb > 0) this.resample(injectProb)
   }
 
   private resample(injectProb: number): void {
