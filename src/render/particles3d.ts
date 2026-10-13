@@ -14,7 +14,10 @@ export class Particles3d {
 
   constructor() {
     const geo = new THREE.ConeGeometry(0.035, 0.16, 5).rotateZ(-Math.PI / 2)
-    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_PARTICLES)
+    // drawn on top of everything ("x-ray"): a converged cloud sits right under the car
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false })
+    this.mesh = new THREE.InstancedMesh(geo, mat, MAX_PARTICLES)
+    this.mesh.renderOrder = 10
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     this.mesh.frustumCulled = false
     this.mesh.count = 0

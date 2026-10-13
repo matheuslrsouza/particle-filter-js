@@ -14,8 +14,9 @@ export class Belief3d {
     }
     this.mesh = new THREE.LineLoop(
       new THREE.BufferGeometry().setFromPoints(pts),
-      new THREE.LineBasicMaterial({ color: COLORS.belief }),
+      new THREE.LineBasicMaterial({ color: COLORS.belief, depthTest: false, transparent: true }),
     )
+    this.mesh.renderOrder = 11
   }
 
   update(e: Estimate): void {
