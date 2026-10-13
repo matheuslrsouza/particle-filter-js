@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { wrapAngle } from '../core/math/angles'
 import type { Pose } from '../core/math/vec'
+import { MpcFollower } from '../core/control/mpc'
 import { ExplorationSim, type ExplorePhase } from '../core/sim/exploration'
 import { VEHICLE } from '../core/sim/simulation'
 import type { MapDef } from '../core/world/map'
@@ -14,6 +15,7 @@ import {
   FootprintTrail,
   Fog,
   GoalMarker,
+  MpcView,
   PlanLine,
   SearchTree,
 } from '../render/explore3d'
@@ -65,7 +67,8 @@ export function startExplore(): void {
   const previous = new PlanLine(EXPLORE_COLORS.previousPlan, 0.05, 0.7)
   const footprints = new FootprintTrail()
   const goal = new GoalMarker()
-  scene.add(worldGroup, fog.mesh, discovered.mesh, footprints.lines, tree.group, previous.line, rawPlan.line, plan.line, goal.group, lidar.group, car.group)
+  const mpcView = new MpcView()
+  scene.add(worldGroup, fog.mesh, discovered.mesh, footprints.lines, tree.group, previous.line, rawPlan.line, plan.line, goal.group, mpcView.group, lidar.group, car.group)
 
   const view: ExploreView = {
     paused: false,
@@ -74,7 +77,7 @@ export function startExplore(): void {
     camera: 'orbit',
     map: mapName,
     dragSetsHeading: false,
-    layers: { tree: true, rawPlan: true, plan: true, previousPlan: true, footprints: true, lidar: true, fog: true, realWalls: false },
+    layers: { mpc: true, tree: true, rawPlan: true, plan: true, previousPlan: true, footprints: true, lidar: true, fog: true, realWalls: false },
   }
   setRealWalls(false)
 
@@ -89,6 +92,7 @@ export function startExplore(): void {
     onCamera: (m) => rig.setMode(m),
     onReset: resetAll,
     onRealWalls: setRealWalls,
+    onController: () => sim.forceReplan(),
   })
 
   // --- goal input: click = goal anywhere; shift+drag (or the panel toggle) = goal + heading ---
@@ -201,6 +205,10 @@ export function startExplore(): void {
       lidar.update(sim.lastScanPose, sim.lastScan)
     }
     car.update(interp, sim.car.steer, sim.car.odometer, view.paused ? 0 : dt)
+    const f = sim.follower
+    const mpcActive = f instanceof MpcFollower && sim.phase === 'driving'
+    if (mpcActive) mpcView.set(f.predicted(), f.reference)
+    mpcView.group.visible = view.layers.mpc && mpcActive
     for (const f of sim.footprints) footprints.push(f)
     sim.footprints = []
 
@@ -216,13 +224,14 @@ export function startExplore(): void {
     rig.update(interp, dt)
     const r = sim.plan?.result
     const planInfo = r ? ` · last plan ${r.millis.toFixed(0)} ms, ${r.expansions} nodes` : ''
-    hud.setStatus(`${PHASE_TEXT[sim.phase]} · replans ${sim.replans}${planInfo} · explored ${(sim.known.explored() * 100).toFixed(0)}%`)
+    const ctl = sim.follower instanceof MpcFollower ? ` · MPC ${sim.follower.solver.lastMillis.toFixed(1)} ms` : sim.follower ? ' · PID' : ''
+    hud.setStatus(`${PHASE_TEXT[sim.phase]}${ctl} · replans ${sim.replans}${planInfo} · explored ${(sim.known.explored() * 100).toFixed(0)}%`)
     hud.chart(
       [
-        { label: 'speed (m/s)', color: '#00e5ff', values: sim.telemetry.map((d) => d.speed), range: 2 },
-        { label: 'CTE (m)', color: '#ff2e88', values: sim.telemetry.map((d) => d.cte), range: 2 },
+        { label: 'speed', color: '#00e5ff', values: sim.telemetry.map((d) => d.speed), range: 2 },
+        { label: 'ref', color: '#ffd60a', values: sim.telemetry.map((d) => d.refSpeed), range: 2 },
       ],
-      '±2 · reverse < 0 · last 30 s',
+      `m/s · CTE ${(sim.follower?.cte ?? 0).toFixed(2)} m · last 30 s`,
     )
     renderer.render(scene, rig.camera)
     requestAnimationFrame(frame)

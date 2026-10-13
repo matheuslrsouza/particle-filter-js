@@ -30,6 +30,7 @@ Pick **Mode → Exploration** in the panel, or open `?mode=explore`. This recrea
 - Hybrid A\* searches over continuous poses (x, y, θ) with arcs the car can actually drive, forward and in reverse. Its search tree is drawn in **orange (forward)** and **blue (reverse)**. Reverse moves show up in dead ends.
 - The raw path (**yellow**) is made of discrete arcs, so it zigzags. As in the Junior paper, it is then smoothed by an optimization that balances closeness to the original, smoothness and distance to walls, while keeping the start, the goal and the gear switches fixed. Points that would collide or turn tighter than the car can are pulled back towards the original.
 - **Cyan** is the current (smoothed) plan, **magenta** the plan it replaced. The **green outlines** are the car's footprints, and red blocks are the walls discovered so far.
+- The car is driven by an **MPC** (model predictive control), like current stacks (Autoware, Apollo, openpilot) and the CarND MPC project. Every 0.1 s it optimizes acceleration and steering rate over the next 2 s on the kinematic bicycle model, solved with iLQR (iterative LQR) in under a millisecond, with no dependencies. It tracks a time-indexed reference sampled from the path and a **speed profile** that slows down in curves (bounded lateral acceleration) and brakes to a stop at gear switches and at the goal. The **green line** is the MPC's prediction and the **yellow dots** are the reference. The PID of the course can still be picked in the panel to compare.
 - **Click** sets a goal. **Shift+drag** (or the *Drag sets goal heading* toggle) also sets the heading the car must arrive with, like a parking spot.
 - Localization is a high-precision GPS (true pose + small noise). The particle filter can't be used here because it needs the map the car doesn't have yet.
 - If the car touches a wall end that slipped between lidar beams, a bumper maps it, backs off and replans.
@@ -55,7 +56,7 @@ src/
     vehicle/       kinematic bicycle model
     localization/  particle filter (Monte Carlo localization)
     planning/      A* (binary heap, 8-connected), Hybrid A* and path smoothing
-    control/       PID path follower (with forward/reverse gears) and twiddle
+    control/       MPC (iLQR) and speed profile, PID path follower (with forward/reverse gears), twiddle
     sim/           simulations: particle filter (known map) and exploration
   modes/           the two app modes (known map / exploration)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras

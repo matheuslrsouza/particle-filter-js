@@ -27,6 +27,8 @@ function runCase(c: Case, seed: number, tweak?: (p: ExploreParams, sim: Explorat
   const sim = new ExplorationSim(c.map, undefined, seed)
   // BENCH_NO_SMOOTH=1 disables the Hybrid A* path smoothing, for comparisons
   if (process.env.BENCH_NO_SMOOTH) sim.smoothing.enabled = false
+  // BENCH_PID=1 uses the PID controller instead of the MPC
+  if (process.env.BENCH_PID) sim.params.controller = 'pid'
   tweak?.(sim.params, sim)
   let bumps = 0
   sim.onMessage = (m) => m.startsWith('Bump') && bumps++

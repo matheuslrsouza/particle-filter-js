@@ -10,6 +10,8 @@ export const EXPLORE_COLORS = {
   treeReverse: 0x3a86ff,
   plan: 0x00e5ff,
   rawPlan: 0xffe066,
+  mpcPrediction: 0x7cfc00,
+  mpcReference: 0xffd60a,
   previousPlan: 0xff2e88,
   footprint: 0x39ff88,
   goal: 0x39ff88,
@@ -271,5 +273,31 @@ export class GoalMarker {
     const pulse = (time * 0.8) % 1
     this.ring.scale.setScalar(1 + pulse * 1.5)
     ;(this.ring.material as THREE.MeshBasicMaterial).opacity = 1 - pulse
+  }
+}
+
+/** What the MPC is thinking: its predicted trajectory (green) and the reference it tracks (yellow). */
+export class MpcView {
+  readonly group = new THREE.Group()
+  private line: THREE.Line
+  private points: THREE.Points
+
+  constructor() {
+    this.line = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: EXPLORE_COLORS.mpcPrediction }))
+    this.points = new THREE.Points(
+      new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({ color: EXPLORE_COLORS.mpcReference, size: 0.06 }),
+    )
+    this.line.position.y = 0.09
+    this.points.position.y = 0.08
+    this.line.frustumCulled = this.points.frustumCulled = false
+    this.group.add(this.line, this.points)
+  }
+
+  set(predicted: Pose[], reference: Pose[]): void {
+    this.line.geometry.dispose()
+    this.points.geometry.dispose()
+    this.line.geometry = new THREE.BufferGeometry().setFromPoints(predicted.map((p) => new THREE.Vector3(p.x, 0, p.y)))
+    this.points.geometry = new THREE.BufferGeometry().setFromPoints(reference.map((p) => new THREE.Vector3(p.x, 0, p.y)))
   }
 }

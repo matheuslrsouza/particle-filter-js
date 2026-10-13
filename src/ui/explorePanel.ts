@@ -10,6 +10,7 @@ export interface ExploreView {
   map: string
   dragSetsHeading: boolean
   layers: {
+    mpc: boolean
     tree: boolean
     rawPlan: boolean
     plan: boolean
@@ -24,7 +25,7 @@ export interface ExploreView {
 export function createExplorePanel(
   sim: ExplorationSim,
   view: ExploreView,
-  hooks: { onCamera: (m: CameraMode) => void; onReset: () => void; onRealWalls: (v: boolean) => void },
+  hooks: { onCamera: (m: CameraMode) => void; onReset: () => void; onRealWalls: (v: boolean) => void; onController: () => void },
 ): GUI {
   const gui = new GUI({ title: 'Controls' })
   if (window.innerWidth < 640) gui.close()
@@ -48,6 +49,7 @@ export function createExplorePanel(
 
   const layers = gui.addFolder('Layers')
   const names: Record<keyof ExploreView['layers'], string> = {
+    mpc: 'MPC prediction / reference',
     tree: 'Search tree (orange fwd / blue rev)',
     rawPlan: 'Raw Hybrid A* path',
     plan: 'Current plan (smoothed)',
@@ -61,6 +63,19 @@ export function createExplorePanel(
     const c = layers.add(view.layers, k).name(names[k])
     if (k === 'realWalls') c.onChange(hooks.onRealWalls)
   }
+
+  const ctl = gui.addFolder('Controller')
+  ctl.add(sim.params, 'controller', { 'MPC (iLQR)': 'mpc', 'PID (course)': 'pid' }).name('Controller').onChange(hooks.onController)
+  ctl.add(sim.mpc, 'horizon', 5, 40, 1).name('MPC horizon N').onFinishChange(hooks.onController)
+  ctl.add(sim.mpc, 'aLat', 0.3, 3, 0.1).name('Max lateral accel').onFinishChange(hooks.onController)
+  ctl.add(sim.mpc.weights, 'lateral', 0, 100, 1).name('Weight: CTE')
+  ctl.add(sim.mpc.weights, 'heading', 0, 50, 0.5).name('Weight: heading')
+  ctl.add(sim.mpc.weights, 'speed', 0, 20, 0.5).name('Weight: speed')
+  ctl.add(sim.mpc.weights, 'steerRate', 0, 5, 0.05).name('Weight: steer rate')
+  ctl.add(sim.params.gains, 'kp', 0, 10, 0.01).name('PID Kp')
+  ctl.add(sim.params.gains, 'kd', 0, 5, 0.01).name('PID Kd')
+  ctl.add(sim.params.gains, 'ki', 0, 2, 0.01).name('PID Ki')
+  ctl.close()
 
   const car = gui.addFolder('Car & sensors')
   car.add(sim.params, 'forwardSpeed', 0.3, 3, 0.1).name('Forward (m/s)')
@@ -76,9 +91,6 @@ export function createExplorePanel(
   plan.add(sim.hybrid, 'reverseCost', 1, 6, 0.1).name('Reverse cost ×')
   plan.add(sim.hybrid, 'switchCost', 0, 10, 0.5).name('Gear switch cost')
   plan.add(sim.hybrid, 'radius', 0.25, 0.6, 0.01).name('Safety radius (m)')
-  plan.add(sim.params.gains, 'kp', 0, 10, 0.01).name('PID Kp')
-  plan.add(sim.params.gains, 'kd', 0, 5, 0.01).name('PID Kd')
-  plan.add(sim.params.gains, 'ki', 0, 2, 0.01).name('PID Ki')
   plan.close()
 
   return gui
