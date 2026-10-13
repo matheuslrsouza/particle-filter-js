@@ -8,6 +8,8 @@ export interface LidarConfig {
   maxRange: number
   /** std deviation of range noise (meters) */
   noise: number
+  /** probability that a beam returns a bogus short range (reflections, dust...) */
+  spurious?: number
 }
 
 export function evenlySpacedBeams(count: number): number[] {
@@ -53,6 +55,7 @@ export function measure(pose: Pose, cfg: LidarConfig, walls: Segment[], rng: Rng
   const z = expectedScan(pose, cfg, walls, new Float64Array(cfg.angles.length))
   for (let i = 0; i < z.length; i++) {
     if (z[i] < cfg.maxRange) z[i] = Math.max(0, rng.gaussian(z[i], cfg.noise))
+    if (cfg.spurious && rng.next() < cfg.spurious) z[i] = rng.range(0.3, Math.min(z[i], cfg.maxRange))
   }
   return z
 }

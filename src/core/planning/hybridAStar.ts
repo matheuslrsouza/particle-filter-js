@@ -3,6 +3,7 @@ import type { Pose } from '../math/vec'
 import { advancePose } from '../vehicle/bicycle'
 import type { KnownMap } from '../world/knownMap'
 import { gridDistance } from './gridDistance'
+import { reedsSheppPaths, sampleReedsShepp } from './reedsShepp'
 import { MinHeap } from './heap'
 
 export interface HybridParams {
@@ -27,6 +28,8 @@ export interface HybridParams {
   maxTreeEdges: number
   /** >1 trades optimality for speed (weighted A*) */
   heuristicWeight: number
+  /** try to reach the goal pose exactly with a Reeds-Shepp curve (Dolgov's analytic expansion) */
+  analyticExpansion: boolean
 }
 
 export const DEFAULT_HYBRID: HybridParams = {
@@ -46,6 +49,7 @@ export const DEFAULT_HYBRID: HybridParams = {
   goalHeadingTolerance: (15 * Math.PI) / 180,
   maxTreeEdges: 60_000,
   heuristicWeight: 1.5,
+  analyticExpansion: true,
 }
 
 export interface PathPose extends Pose {
@@ -58,6 +62,8 @@ export interface HybridResult {
   /** search tree edges [x1, y1, x2, y2, ...], forward and reverse separately */
   treeForward: Float32Array
   treeReverse: Float32Array
+  /** the Reeds-Shepp shot that closed the search, if any [x1, y1, x2, y2, ...] */
+  analytic: Float32Array
   expansions: number
   millis: number
 }
@@ -92,7 +98,8 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
   // near the start the car may already be closer to a wall than the comfort radius
   const startClear = footprintClearance(map, start, p)
   const collides = (x: number, y: number, th: number, nearStart: boolean) => {
-    const r = nearStart ? Math.min(p.radius, startClear - 0.02) : p.radius
+    // near the start the car may be closer than the safety radius, but never get any closer
+    const r = nearStart ? Math.min(p.radius, startClear) : p.radius
     for (const o of p.circleOffsets) {
       if (map.clearanceAt(x + Math.cos(th) * o, y + Math.sin(th) * o) < r) return true
     }
@@ -146,6 +153,30 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
   const pose: Pose = { x: 0, y: 0, theta: 0 }
   let expansions = 0
   let found = -1
+  let analytic: PathPose[] | null = null
+  const turningRadius = p.wheelbase / Math.tan(p.maxSteer)
+  /** Shortest (cost-weighted) collision-free Reeds-Shepp curve from a node to the goal pose. */
+  const reedsSheppShot = (x: number, y: number, th: number): PathPose[] | null => {
+    // a goal without heading is approached facing it
+    const target = goal.useHeading ? goal : { x: goal.x, y: goal.y, theta: Math.atan2(goal.y - y, goal.x - x) }
+    const weighted = (segs: { length: number }[]) => {
+      let c = 0
+      for (let i = 0; i < segs.length; i++) {
+        c += Math.abs(segs[i].length) * turningRadius * (segs[i].length < 0 ? p.reverseCost : 1)
+        if (i > 0 && Math.sign(segs[i].length) !== Math.sign(segs[i - 1].length)) c += p.switchCost
+      }
+      return c
+    }
+    const candidates = reedsSheppPaths({ x, y, theta: th }, target, turningRadius)
+      .map((path) => ({ path, cost: weighted(path.segments) }))
+      .sort((a, b) => a.cost - b.cost)
+      .slice(0, 2)
+    for (const { path } of candidates) {
+      const samples = sampleReedsShepp({ x, y, theta: th }, path, turningRadius, SUBSTEP)
+      if (samples.every((q) => !collides(q.x, q.y, q.theta, false))) return samples
+    }
+    return null
+  }
 
   while (open.size && expansions < p.maxExpansions) {
     const id = open.pop()!
@@ -158,6 +189,19 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
     if (dGoal < p.goalTolerance && (!goal.useHeading || Math.abs(wrapAngle(goal.theta - nth[id])) < p.goalHeadingTolerance)) {
       found = id
       break
+    }
+
+    // analytic expansion: more often as the node gets closer to the goal
+    if (p.analyticExpansion && dGoal < 15) {
+      const interval = Math.max(1, Math.min(10, Math.floor(dGoal / 1.5)))
+      if (expansions % interval === 0) {
+        const shot = reedsSheppShot(nx[id], ny[id], nth[id])
+        if (shot) {
+          found = id
+          analytic = shot
+          break
+        }
+      }
     }
 
     const nearStart = Math.hypot(nx[id] - start.x, ny[id] - start.y) < 1
@@ -211,6 +255,7 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
     path,
     treeForward: new Float32Array(fwd),
     treeReverse: new Float32Array(rev),
+    analytic: shotEdges(found >= 0 ? { x: nx[found], y: ny[found] } : null, analytic),
     expansions,
     millis: performance.now() - t0,
   })
@@ -233,7 +278,23 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
       path.push({ x: pose.x, y: pose.y, theta: pose.theta, dir: ndir[id] })
     }
   }
+  if (analytic) {
+    // the first move of a path that is only a shot carries the shot's gear
+    if (path.length === 1) path[0].dir = analytic[0].dir
+    path.push(...analytic)
+  }
   return result(path)
+}
+
+function shotEdges(from: { x: number; y: number } | null, shot: PathPose[] | null): Float32Array {
+  if (!from || !shot) return new Float32Array(0)
+  const out: number[] = []
+  let prev = from
+  for (const q of shot) {
+    out.push(prev.x, prev.y, q.x, q.y)
+    prev = q
+  }
+  return new Float32Array(out)
 }
 
 // Search buffers are reused between plans (the car replans several times per second):

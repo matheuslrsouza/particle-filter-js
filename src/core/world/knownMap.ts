@@ -7,10 +7,25 @@ export const UNKNOWN = 0
 export const KNOWN_FREE = 1
 export const KNOWN_WALL = 2
 
+/** 'logodds': probabilistic occupancy grid; 'binary': a single lidar hit makes a wall forever */
+export type MappingMode = 'logodds' | 'binary'
+
+// log-odds increments and thresholds: ~2 hits make a wall, a few free observations erase it
+const L_HIT = 0.85
+const L_MISS = 0.4
+/** confirmed walls lose evidence more slowly (hysteresis against grazing beams) */
+const L_MISS_WALL = 0.1
+const L_MIN = -2
+const L_MAX = 3.5
+const WALL_AT = 1.2
+const FREE_AT = -0.2
+
 /**
- * The map the robot builds by itself in exploration mode. Every cell starts unknown;
- * lidar hits mark walls and the cells crossed by a beam become free. The planner treats
- * unknown cells as free (optimistic assumption) and replans when a wall shows up.
+ * The map the robot builds by itself in exploration mode. Every cell starts unknown.
+ * In log-odds mode (the standard occupancy grid) each cell accumulates evidence: a lidar hit
+ * adds, a beam passing through subtracts. A cell becomes a wall only after repeated hits and
+ * becomes free again if later beams go through it, so spurious readings don't leave phantom
+ * walls. The planner treats unknown cells as free (optimistic) and replans when walls appear.
  */
 export class KnownMap {
   readonly cols: number
@@ -18,7 +33,15 @@ export class KnownMap {
   readonly state: Uint8Array
   /** distance (m) from each cell center to the nearest known wall cell center */
   readonly dist: Float32Array
+  readonly logOdds: Float32Array
+  mode: MappingMode = 'logodds'
+  /** wall cells that turned free during the last scan */
+  lastRemoved: number[] = []
   version = 0
+  private touched: Uint32Array
+  /** cells felt by the bumper: physical contact is certain, they are never erased */
+  private pinned: Uint8Array
+  private scanId = 0
 
   constructor(
     readonly width: number,
@@ -29,6 +52,19 @@ export class KnownMap {
     this.rows = Math.ceil(height / cellSize)
     this.state = new Uint8Array(this.cols * this.rows)
     this.dist = new Float32Array(this.cols * this.rows).fill(Infinity)
+    this.logOdds = new Float32Array(this.cols * this.rows)
+    this.touched = new Uint32Array(this.cols * this.rows)
+    this.pinned = new Uint8Array(this.cols * this.rows)
+  }
+
+  /** Forgets everything. */
+  clear(): void {
+    this.state.fill(UNKNOWN)
+    this.dist.fill(Infinity)
+    this.logOdds.fill(0)
+    this.pinned.fill(0)
+    this.lastRemoved = []
+    this.version++
   }
 
   cellOf(x: number, y: number): number {
@@ -69,28 +105,67 @@ export class KnownMap {
 
   /** Adds a scan taken from `pose`. Returns the indices of newly discovered wall cells. */
   integrateScan(pose: Pose, z: Float64Array, lidar: LidarConfig): number[] {
-    const fresh: number[] = []
+    this.lastRemoved = []
+    const hits: number[] = []
+    const misses: number[] = []
+    // each cell is updated at most once per scan, however many beams cross it
+    const id = ++this.scanId
+    const HIT = 1
+    const MISS = 2
     const step = this.cellSize * 0.5
     for (let b = 0; b < z.length; b++) {
       const a = pose.theta + lidar.angles[b]
       const dx = Math.cos(a)
       const dy = Math.sin(a)
       const hit = z[b] < lidar.maxRange
-      const freeUntil = hit ? z[b] - this.cellSize * 0.6 : z[b]
+      // inverse sensor model: free up to one cell before the hit; around the hit it's uncertain
+      // (walls often lie on a cell boundary, so the hit can land in either neighbor cell)
+      const freeUntil = hit ? z[b] - this.cellSize * (this.mode === 'binary' ? 0.6 : 1) : z[b]
       for (let d = 0; d < freeUntil; d += step) {
         const i = this.cellOf(pose.x + dx * d, pose.y + dy * d)
-        if (i >= 0 && this.state[i] === UNKNOWN) this.state[i] = KNOWN_FREE
+        if (i >= 0 && this.touched[i] !== id * 4 + HIT && this.touched[i] !== id * 4 + MISS) {
+          this.touched[i] = id * 4 + MISS
+          misses.push(i)
+        }
       }
       if (hit) {
         // nudge past the surface so the point lands inside the wall's cell
         const i = this.cellOf(pose.x + dx * (z[b] + 0.02), pose.y + dy * (z[b] + 0.02))
-        if (i >= 0 && this.state[i] !== KNOWN_WALL) {
+        if (i >= 0 && this.touched[i] !== id * 4 + HIT) {
+          this.touched[i] = id * 4 + HIT
+          hits.push(i)
+        }
+      }
+    }
+    const fresh: number[] = []
+    if (this.mode === 'binary') {
+      for (const i of misses) if (this.state[i] === UNKNOWN && this.touched[i] === id * 4 + MISS) this.state[i] = KNOWN_FREE
+      for (const i of hits) {
+        if (this.state[i] !== KNOWN_WALL) {
           this.state[i] = KNOWN_WALL
           fresh.push(i)
         }
       }
+    } else {
+      for (const i of hits) this.logOdds[i] = Math.min(L_MAX, this.logOdds[i] + L_HIT)
+      for (const i of misses) {
+        if (this.touched[i] !== id * 4 + MISS || this.pinned[i]) continue
+        const miss = this.state[i] === KNOWN_WALL ? L_MISS_WALL : L_MISS
+        this.logOdds[i] = Math.max(L_MIN, this.logOdds[i] - miss)
+      }
+      for (const list of [hits, misses]) {
+        for (const i of list) {
+          const l = this.logOdds[i]
+          const before = this.state[i]
+          // hysteresis: a wall stays a wall until the evidence says free
+          if (l >= WALL_AT) this.state[i] = KNOWN_WALL
+          else if (l <= FREE_AT) this.state[i] = KNOWN_FREE
+          if (before !== KNOWN_WALL && this.state[i] === KNOWN_WALL) fresh.push(i)
+          if (before === KNOWN_WALL && this.state[i] !== KNOWN_WALL) this.lastRemoved.push(i)
+        }
+      }
     }
-    if (fresh.length) {
+    if (fresh.length || this.lastRemoved.length) {
       this.recomputeDistances()
       this.version++
     }
@@ -100,6 +175,10 @@ export class KnownMap {
   /** Marks specific cells as walls (e.g. felt by the bumper). Returns the ones that were new. */
   markWalls(cells: number[]): number[] {
     const fresh = cells.filter((i) => this.state[i] !== KNOWN_WALL)
+    for (const i of cells) {
+      this.logOdds[i] = L_MAX
+      this.pinned[i] = 1
+    }
     for (const i of fresh) this.state[i] = KNOWN_WALL
     if (fresh.length) {
       this.recomputeDistances()
@@ -117,7 +196,10 @@ export class KnownMap {
         const x = Math.min(w.a.x + ((w.b.x - w.a.x) * s) / n, this.width - 1e-6)
         const y = Math.min(w.a.y + ((w.b.y - w.a.y) * s) / n, this.height - 1e-6)
         const i = this.cellOf(x, y)
-        if (i >= 0) this.state[i] = KNOWN_WALL
+        if (i >= 0) {
+          this.state[i] = KNOWN_WALL
+          this.logOdds[i] = L_MAX
+        }
       }
     }
     this.recomputeDistances()

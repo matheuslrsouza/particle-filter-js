@@ -4,12 +4,12 @@ import type { PidGains } from '../control/pid'
 import { deg2rad, wrapAngle } from '../math/angles'
 import { Rng } from '../math/rng'
 import { clamp, type Pose, type Vec2 } from '../math/vec'
-import { DEFAULT_HYBRID, hybridAStar, poseIsFree, type HybridParams, type HybridResult, type PathPose } from '../planning/hybridAStar'
+import { DEFAULT_HYBRID, footprintClearance, hybridAStar, poseIsFree, type HybridParams, type HybridResult, type PathPose } from '../planning/hybridAStar'
 import { DEFAULT_SMOOTH, PLAN_VALIDITY_RATIO, smoothHybridPath, type HybridSmoothOptions } from '../planning/smoothHybrid'
 import { evenlySpacedBeams, measure, type LidarConfig } from '../sensors/lidar'
 import { advancePose, steerToward, type VehicleState } from '../vehicle/bicycle'
 import { OccupancyGrid, WALL } from '../world/grid'
-import { KnownMap } from '../world/knownMap'
+import { KnownMap, type MappingMode } from '../world/knownMap'
 import { loadWorld, type MapDef, type Segment, type World } from '../world/map'
 import { VEHICLE } from './simulation'
 
@@ -48,6 +48,10 @@ export interface ExploreParams {
   gpsNoise: number
   gpsHeadingNoise: number
   sensorHz: number
+  /** occupancy grid: probabilistic (log-odds) or one hit = wall forever (binary) */
+  mapping: MappingMode
+  /** probability of a bogus short lidar reading per beam */
+  lidarSpurious: number
 }
 
 export const DEFAULT_EXPLORE: ExploreParams = {
@@ -60,6 +64,8 @@ export const DEFAULT_EXPLORE: ExploreParams = {
   gpsNoise: 0.02,
   gpsHeadingNoise: deg2rad(0.5),
   sensorHz: 10,
+  mapping: 'logodds',
+  lidarSpurious: 0.01,
 }
 
 export interface ExplorePlan {
@@ -106,6 +112,8 @@ export class ExplorationSim {
   lastScanPose: Pose | null = null
   /** newly discovered wall cells since the renderer last drained them */
   discovered: number[] = []
+  /** wall cells that evidence turned back into free space (log-odds), drained by the renderer */
+  removedWalls: number[] = []
   planVersion = 0
   /** car poses stamped every 12 cm, drained by the renderer (the green footprint trail) */
   footprints: Pose[] = []
@@ -118,6 +126,8 @@ export class ExplorationSim {
   onMessage: (msg: string) => void = () => {}
 
   private tickCount = 0
+  private escape: { dir: number; steer: number; driven: number } | null = null
+  private triedEscapes: { dir: number; steer: number }[] = []
   private lastReplan = -Infinity
 
   constructor(
@@ -138,9 +148,8 @@ export class ExplorationSim {
     this.car = { ...s, speed: 0, steer: 0, odometer: 0 }
     this.prevCar = { ...s }
     this.estimate = { ...s }
-    this.known.state.fill(0)
-    this.known.dist.fill(Infinity)
-    this.known.version++
+    this.known.clear()
+    this.removedWalls = []
     this.discovered = []
     this.footprints = []
     this.lastFootprint = null
@@ -183,11 +192,19 @@ export class ExplorationSim {
     if (this.phase === 'blocked' && this.phaseTime > 2) this.replan('retry')
     if (this.phase === 'switching' && this.phaseTime > 0.4) this.setPhase('driving')
     if (this.phase === 'recovering') {
-      // after a bump: back off in a straight line, then plan again from a safer pose
-      speed = -this.params.reverseSpeed
-      steer = 0
-      if (this.phaseTime > 0.8) {
+      // recovery behavior after a bump: set the wheels for the chosen escape maneuver, drive it
+      // until there is room again, then plan from that safer pose
+      if (!this.escape) this.escape = this.chooseEscape()
+      const e = this.escape
+      steer = e.steer
+      const ready = Math.abs(this.car.steer - e.steer) < 0.05
+      speed = ready ? e.dir * Math.min(0.5, this.params.reverseSpeed) : 0
+      if (ready) e.driven += Math.abs(speed) * dt
+      const roomy = footprintClearance(this.known, this.estimate, this.hybrid) >= this.hybrid.radius
+      if ((roomy && e.driven > 0.1) || e.driven >= 0.6 || this.phaseTime > 3) {
         speed = 0
+        this.escape = null
+        this.triedEscapes = []
         this.lastReplan = -Infinity
         this.replan('after bump')
       }
@@ -238,7 +255,7 @@ export class ExplorationSim {
     const v = car.speed ? this.rng.gaussian(car.speed, Math.abs(car.speed) * 0.03) : 0
     advancePose(car, v, car.steer, dt, VEHICLE.wheelbase)
     car.odometer += v * dt
-    const contact = this.contactCells(car)
+    const contact = this.contactCells(car, this.prevCar)
     if (contact.length) {
       Object.assign(car, this.prevCar, { speed: 0 })
       // bumper sensor: thin wall ends can slip between lidar beams, so walls touched are mapped too
@@ -246,11 +263,18 @@ export class ExplorationSim {
       this.discovered.push(...fresh)
       if (this.phase === 'driving' || this.phase === 'switching') {
         this.onMessage('Bump! Backing off and replanning.')
+        this.escape = null
+        this.triedEscapes = []
         this.setPhase('recovering')
-      } else if (this.phase === 'recovering') {
-        // can't back off either: just plan from here
-        this.lastReplan = -Infinity
-        this.replan('stuck')
+      } else if (this.phase === 'recovering' && this.escape) {
+        // this escape is blocked too: try the next best one (the bumper just mapped the wall)
+        this.triedEscapes.push(this.escape)
+        this.escape = null
+        if (this.triedEscapes.length >= 6) {
+          this.triedEscapes = []
+          this.lastReplan = -Infinity
+          this.replan('stuck')
+        }
       }
     }
 
@@ -276,11 +300,14 @@ export class ExplorationSim {
       theta: wrapAngle(this.rng.gaussian(car.theta, this.params.gpsHeadingNoise)),
     }
     this.lidar.maxRange = this.params.lidarRange
+    this.lidar.spurious = this.params.lidarSpurious
+    this.known.mode = this.params.mapping
     const z = measure(car, this.lidar, this.world.walls, this.rng)
     this.lastScan = z
     this.lastScanPose = { x: car.x, y: car.y, theta: car.theta }
     this.scanVersion++
     const fresh = this.known.integrateScan(this.estimate, z, this.lidar)
+    if (this.known.lastRemoved.length) this.removedWalls.push(...this.known.lastRemoved)
     if (fresh.length) {
       this.discovered.push(...fresh)
       if (this.plan && (this.phase === 'driving' || this.phase === 'switching') && !this.planStillValid()) {
@@ -351,13 +378,54 @@ export class ExplorationSim {
   }
 
   /** True wall cells touching the car body (empty when there is no collision). */
-  private contactCells(p: Pose): number[] {
+  /**
+   * Picks the short maneuver (forward/reverse × left/straight/right) that gains the most room
+   * according to the map the car knows (lidar + bumper), skipping the ones already tried.
+   */
+  private chooseEscape(): { dir: number; steer: number; driven: number } {
+    let best = { dir: -1, steer: 0, driven: 0 }
+    let bestScore = -Infinity
+    for (const dir of [-1, 1]) {
+      for (const steer of [0, VEHICLE.maxSteer, -VEHICLE.maxSteer]) {
+        if (this.triedEscapes.some((t) => t.dir === dir && t.steer === steer)) continue
+        const p = { ...this.estimate }
+        let worst = Infinity
+        for (let d = 0; d < 0.5; d += 0.05) {
+          advancePose(p, dir, steer, 0.05, VEHICLE.wheelbase)
+          worst = Math.min(worst, footprintClearance(this.known, p, this.hybrid))
+        }
+        // prefer reverse a little: it's the natural way out of a frontal bump
+        const score = worst + footprintClearance(this.known, p, this.hybrid) + (dir < 0 ? 0.02 : 0)
+        if (score > bestScore) {
+          bestScore = score
+          best = { dir, steer, driven: 0 }
+        }
+      }
+    }
+    return best
+  }
+
+  /** Smallest distance from the car body circles to the real walls. */
+  private bodyClearance(p: Pose): number {
+    let min = Infinity
+    for (const o of [0, 0.31, 0.62]) {
+      min = Math.min(min, distanceToWalls(p.x + Math.cos(p.theta) * o, p.y + Math.sin(p.theta) * o, this.world.walls))
+    }
+    return min
+  }
+
+  /**
+   * True wall cells touching the car body when the last move pushed it into a wall (empty
+   * otherwise). A car already touching a wall can always move away from it.
+   */
+  private contactCells(p: Pose, prev: Pose): number[] {
+    const now = this.bodyClearance(p)
+    if (now >= CAR_HALF_WIDTH || now >= this.bodyClearance(prev) - 1e-6) return []
     const g = this.truth
     const cells: number[] = []
     for (const o of [0, 0.31, 0.62]) {
       const x = p.x + Math.cos(p.theta) * o
       const y = p.y + Math.sin(p.theta) * o
-      // exact geometry: the car body (half width 0.22 m) touches a real wall segment
       if (distanceToWalls(x, y, this.world.walls) >= CAR_HALF_WIDTH) continue
       const [c, r] = g.worldToCell({ x, y })
       for (let dr = -2; dr <= 2; dr++) {

@@ -50,7 +50,7 @@ export function createExplorePanel(
   const layers = gui.addFolder('Layers')
   const names: Record<keyof ExploreView['layers'], string> = {
     mpc: 'MPC prediction / reference',
-    tree: 'Search tree (orange fwd / blue rev)',
+    tree: 'Search tree (fwd / rev / Reeds-Shepp)',
     rawPlan: 'Raw Hybrid A* path',
     plan: 'Current plan (smoothed)',
     previousPlan: 'Previous plan',
@@ -82,12 +82,15 @@ export function createExplorePanel(
   car.add(sim.params, 'reverseSpeed', 0.2, 1.5, 0.1).name('Reverse (m/s)')
   car.add(sim.params, 'lidarRange', 1.5, 12, 0.5).name('Lidar range (m)')
   car.add(sim.params, 'gpsNoise', 0, 0.2, 0.01).name('GPS noise (m)')
+  car.add(sim.params, 'lidarSpurious', 0, 0.1, 0.005).name('Lidar bogus readings')
+  car.add(sim.params, 'mapping', { 'Log-odds (probabilistic)': 'logodds', 'Binary (1 hit = wall)': 'binary' }).name('Mapping')
   car.close()
 
   const plan = gui.addFolder('Hybrid A*')
   plan.add(sim.smoothing, 'enabled').name('Smooth the path')
   plan.add(sim.smoothing, 'weightSmooth', 0, 0.5, 0.01).name('Smoothing weight')
   plan.add(sim.hybrid, 'heuristicWeight', 1, 3, 0.1).name('Heuristic weight')
+  plan.add(sim.hybrid, 'analyticExpansion').name('Reeds-Shepp shot to goal')
   plan.add(sim.hybrid, 'reverseCost', 1, 6, 0.1).name('Reverse cost ×')
   plan.add(sim.hybrid, 'switchCost', 0, 10, 0.5).name('Gear switch cost')
   plan.add(sim.hybrid, 'radius', 0.25, 0.6, 0.01).name('Safety radius (m)')
