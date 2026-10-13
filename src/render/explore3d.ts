@@ -9,6 +9,7 @@ export const EXPLORE_COLORS = {
   treeForward: 0xff9f1c,
   treeReverse: 0x3a86ff,
   plan: 0x00e5ff,
+  rawPlan: 0xffe066,
   previousPlan: 0xff2e88,
   footprint: 0x39ff88,
   goal: 0x39ff88,
