@@ -1,4 +1,5 @@
 import type { Vec2 } from '../math/vec'
+import { gridDistance } from '../planning/gridDistance'
 import type { World } from './map'
 
 export const FREE = 0
@@ -97,36 +98,10 @@ export class OccupancyGrid {
     }
   }
 
-  /** Multi-source Dijkstra (8-connected) from every wall cell. */
+  /** Distance (in cells) from every cell to the nearest wall cell. */
   private computeClearance(): Float32Array {
-    const d = new Float32Array(this.cells.length).fill(Infinity)
-    const queue: number[] = []
-    for (let i = 0; i < this.cells.length; i++) {
-      if (this.cells[i] === WALL) {
-        d[i] = 0
-        queue.push(i)
-      }
-    }
-    // label-correcting queue: a cell is re-queued whenever a shorter distance reaches it
-    for (let head = 0; head < queue.length; head++) {
-      const i = queue[head]
-      const c = i % this.cols
-      const r = Math.floor(i / this.cols)
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          if (!dc && !dr) continue
-          const nc = c + dc
-          const nr = r + dr
-          if (!this.inBounds(nc, nr)) continue
-          const j = this.index(nc, nr)
-          const nd = d[i] + (dc && dr ? Math.SQRT2 : 1)
-          if (nd < d[j]) {
-            d[j] = nd
-            queue.push(j)
-          }
-        }
-      }
-    }
-    return d
+    const walls: number[] = []
+    for (let i = 0; i < this.cells.length; i++) if (this.cells[i] === WALL) walls.push(i)
+    return gridDistance(this.cols, this.rows, walls, new Float32Array(this.cells.length))
   }
 }

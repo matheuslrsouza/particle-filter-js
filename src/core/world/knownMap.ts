@@ -1,7 +1,7 @@
 import type { Pose } from '../math/vec'
 import type { LidarConfig } from '../sensors/lidar'
 import type { Segment } from './map'
-import { MinHeap } from '../planning/heap'
+import { gridDistance } from '../planning/gridDistance'
 
 export const UNKNOWN = 0
 export const KNOWN_FREE = 1
@@ -110,34 +110,8 @@ export class KnownMap {
   }
 
   private recomputeDistances(): void {
-    const d = this.dist
-    d.fill(Infinity)
-    const heap = new MinHeap()
-    for (let i = 0; i < this.state.length; i++) {
-      if (this.state[i] === KNOWN_WALL) {
-        d[i] = 0
-        heap.push(i, 0)
-      }
-    }
-    const cs = this.cellSize
-    while (heap.size) {
-      const i = heap.pop()!
-      const c = i % this.cols
-      const r = (i / this.cols) | 0
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          if (!dc && !dr) continue
-          const nc = c + dc
-          const nr = r + dr
-          if (nc < 0 || nr < 0 || nc >= this.cols || nr >= this.rows) continue
-          const j = nr * this.cols + nc
-          const nd = d[i] + (dc && dr ? Math.SQRT2 : 1) * cs
-          if (nd < d[j]) {
-            d[j] = nd
-            heap.push(j, nd)
-          }
-        }
-      }
-    }
+    const walls: number[] = []
+    for (let i = 0; i < this.state.length; i++) if (this.state[i] === KNOWN_WALL) walls.push(i)
+    gridDistance(this.cols, this.rows, walls, this.dist, this.cellSize)
   }
 }

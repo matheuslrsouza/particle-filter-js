@@ -20,7 +20,7 @@ export class CameraRig {
     this.controls.enableDamping = true
     this.controls.maxPolarAngle = Math.PI / 2 - 0.05
     this.controls.minDistance = 2
-    this.controls.maxDistance = 60
+    this.controls.maxDistance = 90
     this.setMode('orbit')
   }
 
@@ -30,7 +30,8 @@ export class CameraRig {
     c.enabled = mode !== 'chase'
     c.enableRotate = mode === 'orbit'
     if (mode === 'orbit') {
-      this.camera.position.set(this.center.x, 22, this.center.z + 24)
+      const size = Math.max(this.world.width, this.world.height)
+      this.camera.position.set(this.center.x, size * 0.75, this.center.z + size * 0.8)
       c.target.copy(this.center)
     } else if (mode === 'top') {
       const fit = (Math.max(this.world.height, this.world.width / this.camera.aspect) / 2) * 1.15

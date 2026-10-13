@@ -2,6 +2,7 @@ import { wrapAngle } from '../math/angles'
 import type { Pose } from '../math/vec'
 import { advancePose } from '../vehicle/bicycle'
 import type { KnownMap } from '../world/knownMap'
+import { gridDistance } from './gridDistance'
 import { MinHeap } from './heap'
 
 export interface HybridParams {
@@ -127,9 +128,10 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
     return nx.length - 1
   }
 
-  const stateCount = cols * rows * bins
-  const bestG = new Float32Array(stateCount).fill(Infinity)
-  const closed = new Uint8Array(stateCount)
+  const { bestG, seenGen, closedGen, gen } = searchBuffers(cols * rows * bins)
+  // a state's bestG/closed only count when stamped with this search's generation
+  const isClosed = (k: number) => closedGen[k] === gen
+  const best = (k: number) => (seenGen[k] === gen ? bestG[k] : Infinity)
   const key = (x: number, y: number, th: number) => {
     const i = map.cellOf(x, y)
     return i < 0 ? -1 : i * bins + binOf(th)
@@ -148,8 +150,8 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
   while (open.size && expansions < p.maxExpansions) {
     const id = open.pop()!
     const k = key(nx[id], ny[id], nth[id])
-    if (k < 0 || closed[k]) continue
-    closed[k] = 1
+    if (k < 0 || isClosed(k)) continue
+    closedGen[k] = gen
     expansions++
 
     const dGoal = Math.hypot(goal.x - nx[id], goal.y - ny[id])
@@ -184,7 +186,7 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
         }
         if (!ok) continue
         const k2 = key(pose.x, pose.y, pose.theta)
-        if (k2 < 0 || closed[k2]) continue
+        if (k2 < 0 || isClosed(k2)) continue
 
         let cost = p.step * (dir < 0 ? p.reverseCost : 1)
         if (nparent[id] >= 0 && dir !== ndir[id]) cost += p.switchCost
@@ -192,10 +194,11 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
         cost += p.steerCost * (Math.abs(steer - nsteer[id]) / p.maxSteer)
         cost += p.wallCost * wallPenalty
         const g2 = ng[id] + cost
-        if (g2 >= bestG[k2]) continue
+        if (g2 >= best(k2)) continue
         const h = heuristic(pose.x, pose.y)
         if (!isFinite(h)) continue
         bestG[k2] = g2
+        seenGen[k2] = gen
         open.push(add(pose.x, pose.y, pose.theta, g2, id, dir, steer), g2 + h)
 
         const edges = dir > 0 ? fwd : rev
@@ -233,6 +236,18 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
   return result(path)
 }
 
+// Search buffers are reused between plans (the car replans several times per second):
+// instead of clearing ~1M entries every time, entries are stamped with a generation number.
+let buffers: { size: number; bestG: Float32Array; seenGen: Uint32Array; closedGen: Uint32Array; gen: number } | null = null
+
+function searchBuffers(size: number) {
+  if (!buffers || buffers.size !== size || buffers.gen >= 0xfffffffe) {
+    buffers = { size, bestG: new Float32Array(size), seenGen: new Uint32Array(size), closedGen: new Uint32Array(size), gen: 0 }
+  }
+  buffers.gen++
+  return buffers
+}
+
 /** Smallest clearance among the footprint circles. */
 export function footprintClearance(map: KnownMap, pose: Pose, p: HybridParams = DEFAULT_HYBRID): number {
   let min = Infinity
@@ -249,33 +264,9 @@ export function poseIsFree(map: KnownMap, pose: Pose, p: HybridParams = DEFAULT_
 
 /** 2D shortest distance (m) from every cell to the goal, through cells with enough clearance. */
 function dijkstraFromGoal(map: KnownMap, goal: Pose, radius: number): Float32Array {
-  const { cols, rows, cellSize } = map
-  const d = new Float32Array(cols * rows).fill(Infinity)
+  const d = new Float32Array(map.cols * map.rows).fill(Infinity)
   const g = map.cellOf(goal.x, goal.y)
   if (g < 0) return d
-  const passable = (i: number) => map.dist[i] - cellSize * 0.5 >= radius * 0.9
-  d[g] = 0
-  const heap = new MinHeap()
-  heap.push(g, 0)
-  while (heap.size) {
-    const i = heap.pop()!
-    const c = i % cols
-    const r = (i / cols) | 0
-    for (let dr = -1; dr <= 1; dr++) {
-      for (let dc = -1; dc <= 1; dc++) {
-        if (!dc && !dr) continue
-        const nc = c + dc
-        const nr = r + dr
-        if (nc < 0 || nr < 0 || nc >= cols || nr >= rows) continue
-        const j = nr * cols + nc
-        if (!passable(j)) continue
-        const nd = d[i] + (dc && dr ? Math.SQRT2 : 1) * cellSize
-        if (nd < d[j]) {
-          d[j] = nd
-          heap.push(j, nd)
-        }
-      }
-    }
-  }
-  return d
+  const minDist = radius * 0.9 + map.cellSize * 0.5
+  return gridDistance(map.cols, map.rows, [g], d, map.cellSize, (i) => map.dist[i] >= minDist)
 }

@@ -34,7 +34,7 @@ export const DEFAULT_EXPLORE: ExploreParams = {
   reverseSpeed: 0.6,
   gains: { kp: 2.5, ki: 0.05, kd: 0.6 },
   lookahead: 0.5,
-  lidarRange: 4,
+  lidarRange: 3,
   gpsNoise: 0.02,
   gpsHeadingNoise: deg2rad(0.5),
   sensorHz: 10,
