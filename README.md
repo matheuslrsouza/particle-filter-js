@@ -21,6 +21,19 @@ The car never knows where it really is: it plans and steers using only the pose 
 - **PID controller → Auto-tune (twiddle)** tunes the gains on the current path in a Web Worker.
 - The chart shows the cross-track error (CTE) and the localization error over the last 30 s.
 
+## Exploration mode (Hybrid A\*)
+
+Pick **Mode → Exploration** in the panel, or open `?mode=explore`. This recreates the
+["A\* in action"](https://youtu.be/qXZt-B7iUyw) demo of the course, where Stanford's Junior drives through a maze it has never seen:
+
+- The car only knows its goal. Unknown space is assumed free, the lidar (4 m range) discovers walls as the car drives, and **Hybrid A\*** replans whenever the current plan runs into one.
+- Hybrid A\* searches over continuous poses (x, y, θ) with arcs the car can actually drive, forward and in reverse. Its search tree is drawn in **orange (forward)** and **blue (reverse)**. Reverse moves show up in dead ends.
+- **Cyan** is the current plan, **magenta** the plan it replaced. The **green outlines** are the car's footprints, and red blocks are the walls discovered so far.
+- **Click** sets a goal. **Shift+drag** (or the *Drag sets goal heading* toggle) also sets the heading the car must arrive with, like a parking spot.
+- Localization is a high-precision GPS (true pose + small noise). The particle filter can't be used here because it needs the map the car doesn't have yet.
+- If the car touches a wall end that slipped between lidar beams, a bumper maps it, backs off and replans.
+- Two maps: a generated maze (`node scripts/generate-maze.mjs [seed]`) and the Udacity map.
+
 ## Running locally
 
 ```bash
@@ -36,14 +49,15 @@ npm run build
 src/
   core/            pure TypeScript simulation, no three.js (unit tested)
     math/          angles, seedable RNG, vectors
-    world/         map loading, occupancy grid + clearance (distance to walls)
+    world/         map loading, occupancy grid, map built from lidar (exploration)
     sensors/       lidar raycasting
     vehicle/       kinematic bicycle model
     localization/  particle filter (Monte Carlo localization)
-    planning/      A* (binary heap, 8-connected) and path smoothing
-    control/       PID path follower and twiddle
-    sim/           fixed-timestep simulation and state machine
-  render/          three.js scene, car, particles, lidar, plan, cameras
+    planning/      A* (binary heap, 8-connected), Hybrid A* and path smoothing
+    control/       PID path follower (with forward/reverse gears) and twiddle
+    sim/           simulations: particle filter (known map) and exploration
+  modes/           the two app modes (known map / exploration)
+  render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
   maps/            maps in meters (JSON)
 ```
