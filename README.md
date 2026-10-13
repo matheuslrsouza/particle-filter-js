@@ -26,13 +26,13 @@ The car never knows where it really is: it plans and steers using only the pose 
 Pick **Mode → Exploration** in the panel, or open `?mode=explore`. This recreates the
 ["A\* in action"](https://youtu.be/qXZt-B7iUyw) demo of the course, where Stanford's Junior drives through a maze it has never seen:
 
-- The car only knows its goal. Unknown space is assumed free, the lidar (4 m range) discovers walls as the car drives, and **Hybrid A\*** replans whenever the current plan runs into one.
+- The car only knows its goal. Unknown space is assumed free, the lidar (3 m range) discovers walls as the car drives, and **Hybrid A\*** replans whenever the current plan runs into one.
 - Hybrid A\* searches over continuous poses (x, y, θ) with arcs the car can actually drive, forward and in reverse. Its search tree is drawn in **orange (forward)** and **blue (reverse)**. Reverse moves show up in dead ends.
 - **Cyan** is the current plan, **magenta** the plan it replaced. The **green outlines** are the car's footprints, and red blocks are the walls discovered so far.
 - **Click** sets a goal. **Shift+drag** (or the *Drag sets goal heading* toggle) also sets the heading the car must arrive with, like a parking spot.
 - Localization is a high-precision GPS (true pose + small noise). The particle filter can't be used here because it needs the map the car doesn't have yet.
 - If the car touches a wall end that slipped between lidar beams, a bumper maps it, backs off and replans.
-- Two maps: a generated maze (`node scripts/generate-maze.mjs [seed]`) and the Udacity map.
+- Two maps: a generated 40 × 27.5 m maze and the Udacity map. The maze is a "perfect" maze (full of dead ends) with a few open plazas. Its seed was picked with `npx vite-node scripts/pick-maze.ts`, which simulates the exploration for many seeds and compares the distance driven with the optimal path. With seed 12 the car first explores a whole wrong region, then backs out of several dead ends (about 1.7× the optimal distance). Regenerate it with `node scripts/generate-maze.mjs [seed]`.
 
 ## Running locally
 
