@@ -68,7 +68,8 @@ export function startExplore(): void {
 
   const view: ExploreView = {
     paused: false,
-    timeScale: 1,
+    // exploring the whole maze takes a few minutes of simulated time
+    timeScale: 2,
     camera: 'orbit',
     map: mapName,
     dragSetsHeading: false,

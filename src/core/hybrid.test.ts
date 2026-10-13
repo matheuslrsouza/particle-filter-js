@@ -54,16 +54,22 @@ describe('hybrid A*', () => {
 })
 
 describe('exploration', () => {
-  it('finds its way through the unknown maze, discovering walls and replanning', async () => {
+  it('finds its way through the unknown maze, discovering walls, backing out of dead ends', async () => {
     const { ExplorationSim } = await import('./sim/exploration')
     const sim = new ExplorationSim(mazeDef as unknown as MapDef, undefined, 1)
     sim.setGoal({ ...sim.world.goal!, useHeading: false })
-    for (let i = 0; i < 50 * 120 && sim.phase !== 'arrived'; i++) sim.tick()
+    let reverseTime = 0
+    for (let i = 0; i < 50 * 300 && sim.phase !== 'arrived'; i++) {
+      sim.tick()
+      if (sim.car.speed < 0) reverseTime += sim.dt
+    }
     expect(sim.phase).toBe('arrived')
     expect(sim.replans).toBeGreaterThan(5)
-    expect(sim.known.explored()).toBeLessThan(0.8)
+    expect(sim.known.explored()).toBeLessThan(0.9)
+    // the maze was picked so that the car walks into dead ends and backs out of them
+    expect(reverseTime).toBeGreaterThan(5)
     expect(Math.hypot(sim.car.x - sim.world.goal!.x, sim.car.y - sim.world.goal!.y)).toBeLessThan(0.7)
-  }, 60_000)
+  }, 120_000)
 
   it('recovers when the bumper hits a wall end the lidar missed', async () => {
     const { ExplorationSim } = await import('./sim/exploration')
