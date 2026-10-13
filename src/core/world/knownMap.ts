@@ -38,11 +38,33 @@ export class KnownMap {
     return r * this.cols + c
   }
 
-  /** Approximate distance (m) from a point to the nearest known wall surface; 0 outside the map. */
+  /**
+   * Distance (m) from a point to the nearest known wall surface, bilinearly interpolated
+   * between cell centers. It must be continuous: with a per-cell value, a point 2 cm away
+   * from a checked pose could read a whole cell less margin. 0 outside the map.
+   */
   clearanceAt(x: number, y: number): number {
-    const i = this.cellOf(x, y)
-    if (i < 0) return 0
-    return Math.max(0, this.dist[i] - this.cellSize * 0.5)
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return 0
+    const cs = this.cellSize
+    const fx = x / cs - 0.5
+    const fy = y / cs - 0.5
+    const c0 = Math.floor(fx)
+    const r0 = Math.floor(fy)
+    const tx = fx - c0
+    const ty = fy - r0
+    const d =
+      this.distAt(c0, r0) * (1 - tx) * (1 - ty) +
+      this.distAt(c0 + 1, r0) * tx * (1 - ty) +
+      this.distAt(c0, r0 + 1) * (1 - tx) * ty +
+      this.distAt(c0 + 1, r0 + 1) * tx * ty
+    return Math.max(0, d - cs * 0.5)
+  }
+
+  private distAt(c: number, r: number): number {
+    // beyond the border (half a cell at the edges) counts as a wall
+    if (c < 0 || r < 0 || c >= this.cols || r >= this.rows) return 0
+    const d = this.dist[r * this.cols + c]
+    return d === Infinity ? 1e3 : d
   }
 
   /** Adds a scan taken from `pose`. Returns the indices of newly discovered wall cells. */

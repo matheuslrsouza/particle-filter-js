@@ -4,12 +4,28 @@ import { deg2rad, wrapAngle } from '../math/angles'
 import { Rng } from '../math/rng'
 import { clamp, type Pose, type Vec2 } from '../math/vec'
 import { DEFAULT_HYBRID, hybridAStar, poseIsFree, type HybridParams, type HybridResult, type PathPose } from '../planning/hybridAStar'
+import { DEFAULT_SMOOTH, PLAN_VALIDITY_RATIO, smoothHybridPath, type HybridSmoothOptions } from '../planning/smoothHybrid'
 import { evenlySpacedBeams, measure, type LidarConfig } from '../sensors/lidar'
 import { advancePose, steerToward, type VehicleState } from '../vehicle/bicycle'
 import { OccupancyGrid, WALL } from '../world/grid'
 import { KnownMap } from '../world/knownMap'
-import { loadWorld, type MapDef, type World } from '../world/map'
+import { loadWorld, type MapDef, type Segment, type World } from '../world/map'
 import { VEHICLE } from './simulation'
+
+const CAR_HALF_WIDTH = 0.22
+
+/** Shortest distance from a point to any wall segment. */
+function distanceToWalls(x: number, y: number, walls: Segment[]): number {
+  let best = Infinity
+  for (const w of walls) {
+    const ex = w.b.x - w.a.x
+    const ey = w.b.y - w.a.y
+    const len2 = ex * ex + ey * ey
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - w.a.x) * ex + (y - w.a.y) * ey) / len2)) : 0
+    best = Math.min(best, Math.hypot(x - (w.a.x + ex * t), y - (w.a.y + ey * t)))
+  }
+  return best
+}
 
 export type ExplorePhase = 'idle' | 'driving' | 'switching' | 'recovering' | 'arrived' | 'blocked'
 
@@ -42,7 +58,10 @@ export const DEFAULT_EXPLORE: ExploreParams = {
 
 export interface ExplorePlan {
   result: HybridResult
+  /** the path the car follows (smoothed) */
   path: PathPose[]
+  /** the raw Hybrid A* path, made of discrete arcs */
+  raw: PathPose[]
 }
 
 /**
@@ -62,6 +81,7 @@ export class ExplorationSim {
   readonly rng: Rng
   lidar: LidarConfig
   hybrid: HybridParams = { ...DEFAULT_HYBRID }
+  smoothing: HybridSmoothOptions & { enabled: boolean } = { ...DEFAULT_SMOOTH, enabled: true }
 
   car!: VehicleState
   prevCar!: Pose
@@ -236,7 +256,7 @@ export class ExplorationSim {
   private planStillValid(): boolean {
     const f = this.follower
     if (!f || !this.plan) return true
-    const relaxed = { ...this.hybrid, radius: this.hybrid.radius * 0.85 }
+    const relaxed = { ...this.hybrid, radius: this.hybrid.radius * PLAN_VALIDITY_RATIO }
     // skip the poses the car already drove past
     let skip = 0
     for (let s = 0; s < f.segment; s++) skip += f.gears[s].points.length - 1
@@ -259,8 +279,9 @@ export class ExplorationSim {
       this.setPhase('blocked')
       return false
     }
-    this.plan = { result, path: result.path }
-    this.follower = new GearFollower(splitByGear(result.path), this.params.gains, this.params.lookahead)
+    const path = this.smoothing.enabled ? smoothHybridPath(result.path, this.known, this.hybrid, this.smoothing) : result.path
+    this.plan = { result, path, raw: result.path }
+    this.follower = new GearFollower(splitByGear(path), this.params.gains, this.params.lookahead)
     this.planVersion++
     if (reason !== 'new goal') this.replans++
     if (this.follower.gears.length === 0) {
@@ -290,8 +311,9 @@ export class ExplorationSim {
     for (const o of [0, 0.31, 0.62]) {
       const x = p.x + Math.cos(p.theta) * o
       const y = p.y + Math.sin(p.theta) * o
+      // exact geometry: the car body (half width 0.22 m) touches a real wall segment
+      if (distanceToWalls(x, y, this.world.walls) >= CAR_HALF_WIDTH) continue
       const [c, r] = g.worldToCell({ x, y })
-      if (!g.inBounds(c, r) || g.clearance[g.index(c, r)] * g.cellSize - g.cellSize * 0.5 >= 0.15) continue
       for (let dr = -2; dr <= 2; dr++) {
         for (let dc = -2; dc <= 2; dc++) {
           if (g.inBounds(c + dc, r + dr) && g.cells[g.index(c + dc, r + dr)] === WALL) cells.push(g.index(c + dc, r + dr))

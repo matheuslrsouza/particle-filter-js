@@ -61,10 +61,11 @@ export function startExplore(): void {
   const fog = new Fog(sim.known)
   const tree = new SearchTree()
   const plan = new PlanLine(EXPLORE_COLORS.plan, 0.06)
+  const rawPlan = new PlanLine(EXPLORE_COLORS.rawPlan, 0.045, 0.6)
   const previous = new PlanLine(EXPLORE_COLORS.previousPlan, 0.05, 0.7)
   const footprints = new FootprintTrail()
   const goal = new GoalMarker()
-  scene.add(worldGroup, fog.mesh, discovered.mesh, footprints.lines, tree.group, previous.line, plan.line, goal.group, lidar.group, car.group)
+  scene.add(worldGroup, fog.mesh, discovered.mesh, footprints.lines, tree.group, previous.line, rawPlan.line, plan.line, goal.group, lidar.group, car.group)
 
   const view: ExploreView = {
     paused: false,
@@ -73,7 +74,7 @@ export function startExplore(): void {
     camera: 'orbit',
     map: mapName,
     dragSetsHeading: false,
-    layers: { tree: true, plan: true, previousPlan: true, footprints: true, lidar: true, fog: true, realWalls: false },
+    layers: { tree: true, rawPlan: true, plan: true, previousPlan: true, footprints: true, lidar: true, fog: true, realWalls: false },
   }
   setRealWalls(false)
 
@@ -188,6 +189,7 @@ export function startExplore(): void {
     if (sim.planVersion !== planVersion) {
       planVersion = sim.planVersion
       plan.set(sim.plan?.path ?? null)
+      rawPlan.set(sim.plan?.raw ?? null)
       previous.set(sim.previousPlan)
       if (sim.plan) tree.set(sim.plan.result.treeForward, sim.plan.result.treeReverse, t)
       goal.set(sim.goal)
@@ -205,6 +207,7 @@ export function startExplore(): void {
     const L = view.layers
     tree.group.visible = L.tree
     plan.line.visible = L.plan
+    rawPlan.line.visible = L.rawPlan
     previous.line.visible = L.previousPlan
     footprints.lines.visible = L.footprints
     lidar.group.visible = L.lidar && !!sim.lastScan

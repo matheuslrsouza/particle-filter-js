@@ -11,6 +11,7 @@ export interface ExploreView {
   dragSetsHeading: boolean
   layers: {
     tree: boolean
+    rawPlan: boolean
     plan: boolean
     previousPlan: boolean
     footprints: boolean
@@ -48,7 +49,8 @@ export function createExplorePanel(
   const layers = gui.addFolder('Layers')
   const names: Record<keyof ExploreView['layers'], string> = {
     tree: 'Search tree (orange fwd / blue rev)',
-    plan: 'Current plan',
+    rawPlan: 'Raw Hybrid A* path',
+    plan: 'Current plan (smoothed)',
     previousPlan: 'Previous plan',
     footprints: 'Car footprints',
     lidar: 'Lidar beams',
@@ -68,6 +70,8 @@ export function createExplorePanel(
   car.close()
 
   const plan = gui.addFolder('Hybrid A*')
+  plan.add(sim.smoothing, 'enabled').name('Smooth the path')
+  plan.add(sim.smoothing, 'weightSmooth', 0, 0.5, 0.01).name('Smoothing weight')
   plan.add(sim.hybrid, 'heuristicWeight', 1, 3, 0.1).name('Heuristic weight')
   plan.add(sim.hybrid, 'reverseCost', 1, 6, 0.1).name('Reverse cost ×')
   plan.add(sim.hybrid, 'switchCost', 0, 10, 0.5).name('Gear switch cost')

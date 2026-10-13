@@ -28,7 +28,8 @@ Pick **Mode → Exploration** in the panel, or open `?mode=explore`. This recrea
 
 - The car only knows its goal. Unknown space is assumed free, the lidar (3 m range) discovers walls as the car drives, and **Hybrid A\*** replans whenever the current plan runs into one.
 - Hybrid A\* searches over continuous poses (x, y, θ) with arcs the car can actually drive, forward and in reverse. Its search tree is drawn in **orange (forward)** and **blue (reverse)**. Reverse moves show up in dead ends.
-- **Cyan** is the current plan, **magenta** the plan it replaced. The **green outlines** are the car's footprints, and red blocks are the walls discovered so far.
+- The raw path (**yellow**) is made of discrete arcs, so it zigzags. As in the Junior paper, it is then smoothed by an optimization that balances closeness to the original, smoothness and distance to walls, while keeping the start, the goal and the gear switches fixed. Points that would collide or turn tighter than the car can are pulled back towards the original.
+- **Cyan** is the current (smoothed) plan, **magenta** the plan it replaced. The **green outlines** are the car's footprints, and red blocks are the walls discovered so far.
 - **Click** sets a goal. **Shift+drag** (or the *Drag sets goal heading* toggle) also sets the heading the car must arrive with, like a parking spot.
 - Localization is a high-precision GPS (true pose + small noise). The particle filter can't be used here because it needs the map the car doesn't have yet.
 - If the car touches a wall end that slipped between lidar beams, a bumper maps it, backs off and replans.
