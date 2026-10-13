@@ -1,4 +1,5 @@
 import { GearFollower, splitByGear } from '../control/gearFollower'
+import { DEFAULT_MPC, MpcFollower, type MpcParams } from '../control/mpc'
 import type { PidGains } from '../control/pid'
 import { deg2rad, wrapAngle } from '../math/angles'
 import { Rng } from '../math/rng'
@@ -33,7 +34,11 @@ export interface ExploreGoal extends Pose {
   useHeading: boolean
 }
 
+export type Controller = 'mpc' | 'pid'
+
 export interface ExploreParams {
+  /** MPC (iLQR) with a speed profile, or the PID of the course with constant speed */
+  controller: Controller
   forwardSpeed: number
   reverseSpeed: number
   gains: PidGains
@@ -46,6 +51,7 @@ export interface ExploreParams {
 }
 
 export const DEFAULT_EXPLORE: ExploreParams = {
+  controller: 'mpc',
   forwardSpeed: 1.2,
   reverseSpeed: 0.6,
   gains: { kp: 2.5, ki: 0.05, kd: 0.6 },
@@ -82,6 +88,7 @@ export class ExplorationSim {
   lidar: LidarConfig
   hybrid: HybridParams = { ...DEFAULT_HYBRID }
   smoothing: HybridSmoothOptions & { enabled: boolean } = { ...DEFAULT_SMOOTH, enabled: true }
+  mpc: MpcParams = structuredClone(DEFAULT_MPC)
 
   car!: VehicleState
   prevCar!: Pose
@@ -90,7 +97,7 @@ export class ExplorationSim {
   goal: ExploreGoal | null = null
   plan: ExplorePlan | null = null
   previousPlan: PathPose[] | null = null
-  follower: GearFollower | null = null
+  follower: GearFollower | MpcFollower | null = null
   phase: ExplorePhase = 'idle'
   phaseTime = 0
   time = 0
@@ -103,9 +110,11 @@ export class ExplorationSim {
   /** car poses stamped every 12 cm, drained by the renderer (the green footprint trail) */
   footprints: Pose[] = []
   private lastFootprint: Pose | null = null
+  /** speed the controller is aiming for (reference), for the chart */
+  refSpeed = 0
   /** bumps on every lidar scan */
   scanVersion = 0
-  telemetry: { t: number; speed: number; cte: number }[] = []
+  telemetry: { t: number; speed: number; refSpeed: number; cte: number }[] = []
   onMessage: (msg: string) => void = () => {}
 
   private tickCount = 0
@@ -151,6 +160,13 @@ export class ExplorationSim {
     return this.replan('new goal')
   }
 
+  /** Replans right away (e.g. after switching controllers in the panel). */
+  forceReplan(): void {
+    if (!this.goal || this.phase === 'arrived') return
+    this.lastReplan = -Infinity
+    this.replan('forced')
+  }
+
   tick(): void {
     const dt = this.dt
     this.prevCar = { x: this.car.x, y: this.car.y, theta: this.car.theta }
@@ -160,6 +176,8 @@ export class ExplorationSim {
 
     let speed = 0
     let steer = this.car.steer
+    /** [acceleration, steering rate] when the MPC drives; otherwise speed/steer commands */
+    let mpcCmd: [number, number] | null = null
     const f = this.follower
     // walls discovered later may open a new way: retry now and then
     if (this.phase === 'blocked' && this.phaseTime > 2) this.replan('retry')
@@ -174,12 +192,27 @@ export class ExplorationSim {
         this.replan('after bump')
       }
     }
-    if (this.phase === 'driving' && f) {
+    if (this.phase === 'driving' && f instanceof MpcFollower) {
+      mpcCmd = f.control(this.estimate, this.car.speed, this.car.steer, dt)
+      this.refSpeed = f.refSpeed
+      if (f.segmentDone) {
+        mpcCmd = null
+        if (f.done) {
+          this.arriveOrReplan()
+        } else {
+          f.next()
+          this.setPhase('switching')
+        }
+      } else if (Math.abs(f.cte) > 0.7) {
+        this.replan('drifted off the path')
+      }
+    } else if (this.phase === 'driving' && f instanceof GearFollower) {
       steer = f.steer(this.estimate, dt)
       const gearSpeed = f.gear.dir > 0 ? this.params.forwardSpeed : this.params.reverseSpeed
       // slow down before stopping to switch gears or at the goal
       const slow = clamp(f.distanceToSegmentEnd(this.estimate) / 0.8, 0.3, 1)
       speed = f.gear.dir * gearSpeed * slow
+      this.refSpeed = speed
       if (f.segmentDone) {
         speed = 0
         if (f.done) {
@@ -194,9 +227,15 @@ export class ExplorationSim {
     }
 
     const car = this.car
-    steerToward(car, steer, dt, VEHICLE)
-    car.speed = speed
-    const v = speed ? this.rng.gaussian(speed, Math.abs(speed) * 0.03) : 0
+    if (mpcCmd) {
+      // the MPC commands acceleration and steering rate, like real actuators
+      car.steer = clamp(car.steer + mpcCmd[1] * dt, -VEHICLE.maxSteer, VEHICLE.maxSteer)
+      car.speed = clamp(car.speed + mpcCmd[0] * dt, -this.params.reverseSpeed * 1.5, this.params.forwardSpeed * 1.5)
+    } else {
+      steerToward(car, steer, dt, VEHICLE)
+      car.speed = speed
+    }
+    const v = car.speed ? this.rng.gaussian(car.speed, Math.abs(car.speed) * 0.03) : 0
     advancePose(car, v, car.steer, dt, VEHICLE.wheelbase)
     car.odometer += v * dt
     const contact = this.contactCells(car)
@@ -221,8 +260,8 @@ export class ExplorationSim {
       this.footprints.push(this.lastFootprint)
     }
 
-    // dead reckoning between GPS fixes, with what was commanded
-    advancePose(this.estimate, speed, car.steer, dt, VEHICLE.wheelbase)
+    // dead reckoning between GPS fixes, with the wheel speed and steering angle
+    advancePose(this.estimate, car.speed, car.steer, dt, VEHICLE.wheelbase)
 
     const every = Math.max(1, Math.round(1 / (this.params.sensorHz * dt)))
     if (this.tickCount % every === 0) this.sense()
@@ -248,7 +287,8 @@ export class ExplorationSim {
         this.replan('new wall on the path')
       }
     }
-    this.telemetry.push({ t: this.time, speed: car.speed, cte: this.phase === 'driving' && this.follower ? this.follower.cte : 0 })
+    const driving = this.phase === 'driving' && this.follower
+    this.telemetry.push({ t: this.time, speed: car.speed, refSpeed: driving ? this.refSpeed : 0, cte: driving ? this.follower!.cte : 0 })
     if (this.telemetry.length > 300) this.telemetry.shift()
   }
 
@@ -281,7 +321,13 @@ export class ExplorationSim {
     }
     const path = this.smoothing.enabled ? smoothHybridPath(result.path, this.known, this.hybrid, this.smoothing) : result.path
     this.plan = { result, path, raw: result.path }
-    this.follower = new GearFollower(splitByGear(path), this.params.gains, this.params.lookahead)
+    const gears = splitByGear(path)
+    if (this.params.controller === 'mpc') {
+      Object.assign(this.mpc, { forwardSpeed: this.params.forwardSpeed, reverseSpeed: this.params.reverseSpeed })
+      this.follower = new MpcFollower(gears, this.mpc)
+    } else {
+      this.follower = new GearFollower(gears, this.params.gains, this.params.lookahead)
+    }
     this.planVersion++
     if (reason !== 'new goal') this.replans++
     if (this.follower.gears.length === 0) {

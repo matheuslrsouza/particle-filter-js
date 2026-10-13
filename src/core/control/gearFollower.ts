@@ -5,7 +5,8 @@ import { PathFollower, type PidGains } from './pid'
 
 export interface Gear {
   dir: number
-  points: Vec2[]
+  /** poses of the segment (the heading is used as reference by the MPC) */
+  points: PathPose[]
 }
 
 /** Splits a Hybrid A* path wherever the car switches between forward and reverse. */
@@ -17,9 +18,9 @@ export function splitByGear(path: PathPose[]): Gear[] {
     if (!cur || cur.dir !== p.dir) {
       // the switching pose belongs to both segments
       const prev = path[i - 1]
-      gears.push({ dir: p.dir, points: prev ? [{ x: prev.x, y: prev.y }] : [] })
+      gears.push({ dir: p.dir, points: prev ? [{ ...prev, dir: p.dir }] : [] })
     }
-    gears[gears.length - 1].points.push({ x: p.x, y: p.y })
+    gears[gears.length - 1].points.push({ ...p })
   }
   return gears.filter((g) => g.points.length >= 2)
 }
