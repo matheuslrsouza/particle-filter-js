@@ -184,6 +184,12 @@ export function startExplore(): void {
     interp.y = a.y + (b.y - a.y) * alpha
     interp.theta = a.theta + wrapAngle(b.theta - a.theta) * alpha
 
+    if (sim.removedWalls.length) {
+      // evidence erased some walls (log-odds): redraw from the map, the new ones included
+      discovered.rebuild()
+      sim.removedWalls = []
+      sim.discovered = []
+    }
     if (sim.discovered.length) {
       discovered.add(sim.discovered, t)
       sim.discovered = []
@@ -195,7 +201,7 @@ export function startExplore(): void {
       plan.set(sim.plan?.path ?? null)
       rawPlan.set(sim.plan?.raw ?? null)
       previous.set(sim.previousPlan)
-      if (sim.plan) tree.set(sim.plan.result.treeForward, sim.plan.result.treeReverse, t)
+      if (sim.plan) tree.set(sim.plan.result.treeForward, sim.plan.result.treeReverse, t, sim.plan.result.analytic)
       goal.set(sim.goal)
     }
     tree.animate(t)

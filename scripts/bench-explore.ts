@@ -29,6 +29,11 @@ function runCase(c: Case, seed: number, tweak?: (p: ExploreParams, sim: Explorat
   if (process.env.BENCH_NO_SMOOTH) sim.smoothing.enabled = false
   // BENCH_PID=1 uses the PID controller instead of the MPC
   if (process.env.BENCH_PID) sim.params.controller = 'pid'
+  // BENCH_NO_RS=1 disables the Reeds-Shepp shot; BENCH_BINARY=1 uses the binary map;
+  // BENCH_SPURIOUS=<p> sets the rate of bogus lidar readings
+  if (process.env.BENCH_NO_RS) sim.hybrid.analyticExpansion = false
+  if (process.env.BENCH_BINARY) sim.params.mapping = 'binary'
+  if (process.env.BENCH_SPURIOUS) sim.params.lidarSpurious = Number(process.env.BENCH_SPURIOUS)
   tweak?.(sim.params, sim)
   let bumps = 0
   sim.onMessage = (m) => m.startsWith('Bump') && bumps++

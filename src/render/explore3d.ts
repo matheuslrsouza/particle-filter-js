@@ -2,12 +2,13 @@ import * as THREE from 'three'
 import type { Pose } from '../core/math/vec'
 import type { PathPose } from '../core/planning/hybridAStar'
 import type { ExploreGoal } from '../core/sim/exploration'
-import { UNKNOWN, type KnownMap } from '../core/world/knownMap'
+import { KNOWN_WALL, UNKNOWN, type KnownMap } from '../core/world/knownMap'
 
 export const EXPLORE_COLORS = {
   wall: 0xe63946,
   treeForward: 0xff9f1c,
   treeReverse: 0x3a86ff,
+  analytic: 0xc77dff,
   plan: 0x00e5ff,
   rawPlan: 0xffe066,
   mpcPrediction: 0x7cfc00,
@@ -50,6 +51,14 @@ export class DiscoveredWalls {
   clear(): void {
     this.mesh.count = 0
     this.born = []
+  }
+
+  /** Redraws every wall of the map (after some walls were erased by new evidence). */
+  rebuild(): void {
+    this.clear()
+    for (let i = 0; i < this.map.state.length; i++) {
+      if (this.map.state[i] === KNOWN_WALL) this.place(this.mesh.count++, i, 1)
+    }
   }
 
   animate(now: number): void {
@@ -113,11 +122,12 @@ export class Fog {
   }
 }
 
-/** Hybrid A* search tree: forward arcs in orange, reverse arcs in blue. */
+/** Hybrid A* search tree: forward arcs in orange, reverse arcs in blue, Reeds-Shepp shot in purple. */
 export class SearchTree {
   readonly group = new THREE.Group()
   private forward: THREE.LineSegments
   private reverse: THREE.LineSegments
+  private analytic: THREE.LineSegments
   private shownAt = 0
 
   constructor() {
@@ -131,11 +141,13 @@ export class SearchTree {
     }
     this.forward = make(EXPLORE_COLORS.treeForward)
     this.reverse = make(EXPLORE_COLORS.treeReverse)
-    this.group.add(this.forward, this.reverse)
+    this.analytic = make(EXPLORE_COLORS.analytic)
+    this.group.add(this.forward, this.reverse, this.analytic)
   }
 
-  set(forward: Float32Array, reverse: Float32Array, now: number): void {
-    for (const [line, data] of [[this.forward, forward], [this.reverse, reverse]] as const) {
+  /** `analytic` is the Reeds-Shepp shot that reached the goal, drawn in purple. */
+  set(forward: Float32Array, reverse: Float32Array, now: number, analytic = new Float32Array(0)): void {
+    for (const [line, data] of [[this.forward, forward], [this.reverse, reverse], [this.analytic, analytic]] as const) {
       const pos = new Float32Array((data.length / 2) * 3)
       for (let i = 0, j = 0; i < data.length; i += 2, j += 3) {
         pos[j] = data[i]
@@ -156,7 +168,7 @@ export class SearchTree {
   /** Grows the tree in over a fraction of a second, in the order nodes were expanded. */
   animate(now: number): void {
     const k = Math.min(1, (now - this.shownAt) / 0.5)
-    for (const line of [this.forward, this.reverse]) {
+    for (const line of [this.forward, this.reverse, this.analytic]) {
       const n = line.geometry.attributes.position?.count ?? 0
       line.geometry.setDrawRange(0, Math.floor((n * k) / 2) * 2)
     }
