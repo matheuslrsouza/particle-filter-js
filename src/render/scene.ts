@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import type { World } from '../core/world/map'
 
 export const COLORS = {
   background: 0x0b0f16,
@@ -30,7 +29,13 @@ export function createRenderer(container: HTMLElement): THREE.WebGLRenderer {
   return renderer
 }
 
-export function createScene(world: World): THREE.Scene {
+/** Anything with a size in meters: a maze, a city... */
+export interface Area {
+  width: number
+  height: number
+}
+
+export function createScene(world: Area): THREE.Scene {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(COLORS.background)
   scene.fog = new THREE.Fog(COLORS.background, 35, 80)
