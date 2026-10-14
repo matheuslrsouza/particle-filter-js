@@ -109,3 +109,54 @@ describe('missions', () => {
     expect(sim.mission!.reached).toBe(3)
   }, 120_000)
 })
+
+describe('parking', () => {
+  it('lays out spots inside the real lots, some free between two parked cars', async () => {
+    const { buildParking, spotsBetweenCars } = await import('./city/parking')
+    const lots = buildParking(city)
+    expect(lots.reduce((s, l) => s + l.spots.length, 0)).toBeGreaterThan(500)
+    expect(lots.reduce((s, l) => s + spotsBetweenCars(l).length, 0)).toBeGreaterThan(50)
+  })
+
+  it('parks between two cars without touching them', async () => {
+    const { rectangle } = await import('./city/parking')
+    type P = { x: number; y: number }
+    const overlap = (a: P[], b: P[]) => {
+      for (const poly of [a, b]) {
+        for (let i = 0; i < 4; i++) {
+          const p = poly[i]
+          const q = poly[(i + 1) % 4]
+          const nx = -(q.y - p.y)
+          const ny = q.x - p.x
+          const pa = a.map((v) => v.x * nx + v.y * ny)
+          const pb = b.map((v) => v.x * nx + v.y * ny)
+          if (Math.max(...pa) < Math.min(...pb) || Math.max(...pb) < Math.min(...pa)) return false
+        }
+      }
+      return true
+    }
+    for (const seed of [1, 4]) {
+      const sim = new CitySim(city, seed)
+      sim.gpsGrade = 'dual'
+      expect(sim.startParking()).toBe(true)
+      const cars = sim.parkedCars()
+      let touched = false
+      for (let i = 0; i < 50 * 400 && !['parked', 'stuck'].includes(sim.phase); i++) {
+        sim.tick()
+        if (sim.phase === 'parking' && i % 5 === 0) {
+          const c = sim.car
+          const body = rectangle({ x: c.x + Math.cos(c.theta) * 1.74, y: c.y + Math.sin(c.theta) * 1.74 }, c.theta, 5.04, 1.95)
+          if (cars.some((p) => overlap(body, p))) touched = true
+        }
+      }
+      expect(sim.phase).toBe('parked')
+      expect(touched).toBe(false)
+      const g = sim.parkingGoal!
+      const c = sim.car
+      const center = { x: c.x + Math.cos(c.theta) * 1.74, y: c.y + Math.sin(c.theta) * 1.74 }
+      expect(Math.hypot(center.x - g.spot.center.x, center.y - g.spot.center.y)).toBeLessThan(0.35)
+      // aligned with the spot (front or back in)
+      expect(Math.abs(Math.sin(c.theta - g.spot.heading))).toBeLessThan(0.1)
+    }
+  }, 180_000)
+})

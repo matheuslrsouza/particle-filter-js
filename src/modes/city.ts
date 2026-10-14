@@ -1,14 +1,14 @@
 import GUI from 'lil-gui'
 import * as THREE from 'three'
 import type { CityDef } from '../core/city/cityDef'
-import { CITY_VEHICLE, CitySim, type Localization } from '../core/city/citySim'
+import { CITY_CAR, CITY_VEHICLE, CitySim, type Localization } from '../core/city/citySim'
 import type { GpsGrade } from '../core/sensors/gps'
 import { wrapAngle } from '../core/math/angles'
 import type { Pose } from '../core/math/vec'
 import { Belief3d } from '../render/belief3d'
 import { CameraRig, type CameraMode } from '../render/cameras'
 import { Car3d } from '../render/car3d'
-import { barricade, checkpointMarker, createCity3d, destinationPin, laneGraphView, routeRibbon } from '../render/city3d'
+import { barricade, checkpointMarker, createCity3d, destinationPin, laneGraphView, parkingView, routeRibbon, targetSpot } from '../render/city3d'
 import { EXPLORE_COLORS, MpcView, PlanLine, SearchTree } from '../render/explore3d'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
@@ -49,10 +49,12 @@ export async function startCity(): Promise<void> {
   lanes.visible = false
   // the maze car is modeled with a 0.5 m wheelbase: scale it to a real car
   const car = new Car3d(0.5)
-  car.group.scale.setScalar(CITY_VEHICLE.wheelbase / 0.5)
+  // the maze car model (0.5 m wheelbase, 0.44 m wide): scale it to a real sedan
+  const carScale = new THREE.Vector3(CITY_VEHICLE.wheelbase / 0.5, CITY_VEHICLE.wheelbase / 0.5, CITY_CAR.width / 0.44)
+  car.group.scale.copy(carScale)
   // where the car believes it is (EKF estimate): wireframe ghost + 2σ ellipse + GPS fixes
   const ghost = new Car3d(0.5, true)
-  ghost.group.scale.setScalar(CITY_VEHICLE.wheelbase / 0.5)
+  ghost.group.scale.copy(carScale)
   const ellipse = new Belief3d()
   const gpsGeo = new THREE.BufferGeometry()
   const gpsPoints = new THREE.Points(
@@ -76,7 +78,9 @@ export async function startCity(): Promise<void> {
   // the U-turn maneuver: Hybrid A* search tree and path (in the local grid frame)
   const maneuverTree = new SearchTree()
   const maneuverPath = new PlanLine(EXPLORE_COLORS.plan, 0.4)
-  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line)
+  const lots = parkingView(sim.parking, CITY_CAR)
+  const spotHighlight = targetSpot()
+  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line, lots, spotHighlight)
   scene.add(city3d.group, lanes, car.group, ghost.group, ellipse.mesh, gpsPoints, pin, mpcView.group)
 
   const view = {
@@ -104,8 +108,12 @@ export async function startCity(): Promise<void> {
   simF
     .add({ block: () => sim.placeBarrierAhead(70) || hud.message('Drive first: the barricade goes on a two-way street of the route.') }, 'block')
     .name('Block a road ahead')
+  simF.add({ park: () => sim.startParking() }, 'park').name('Park between two cars')
   simF.add({ reset: () => sim.reset() }, 'reset').name('Reset car')
-  simF.add(view, 'camera', { Chase: 'chase', Orbit: 'orbit', 'Top-down': 'top' }).name('Camera').onChange((m: CameraMode) => rig.setMode(m))
+  simF
+    .add(view, 'camera', { Chase: 'chase', Orbit: 'orbit', 'Top-down': 'top', 'Whole city': 'city' as CameraMode })
+    .name('Camera')
+    .onChange((m: CameraMode | 'city') => (m === 'city' ? rig.setMode('top') : rig.setMode(m, sim.car, 60)))
   const loc = gui.addFolder('Localization')
   loc
     .add(view, 'localization', { 'EKF (GPS + odometry)': 'ekf', 'GPS only': 'gps', 'Odometry only': 'odometry', 'True pose (cheat)': 'truth' })
@@ -180,7 +188,7 @@ export async function startCity(): Promise<void> {
       }
       route = sim.route ? routeRibbon(sim.route.path) : null
       if (route) scene.add(route)
-      pin.visible = !!sim.destination && !sim.mission
+      pin.visible = !!sim.destination && !sim.mission && !sim.parkingGoal
       if (sim.destination) pin.position.set(sim.destination.x, 0, sim.destination.y)
       checkpoints.clear()
       sim.mission?.checkpoints.forEach((c, i) => {
@@ -188,6 +196,12 @@ export async function startCity(): Promise<void> {
         m.position.set(c.x, 0, c.y)
         checkpoints.add(m)
       })
+      const pg = sim.parkingGoal
+      spotHighlight.visible = !!pg
+      if (pg) {
+        spotHighlight.position.set(pg.spot.center.x, 0.12, pg.spot.center.y)
+        spotHighlight.rotation.y = -pg.spot.heading
+      }
       const mv = sim.maneuver
       maneuverPath.set(mv ? mv.path : null)
       if (mv) {
@@ -209,7 +223,7 @@ export async function startCity(): Promise<void> {
       })
     })
     maneuverTree.animate(now / 1000)
-    maneuverTree.group.visible = maneuverPath.line.visible = sim.phase === 'uturn'
+    maneuverTree.group.visible = maneuverPath.line.visible = sim.phase === 'uturn' || sim.phase === 'parking'
     const lp = new Float32Array(sim.lidarRays.length * 6)
     const lc = new Float32Array(sim.lidarRays.length * 6)
     sim.lidarRays.forEach((r, i) => {
@@ -253,11 +267,14 @@ export async function startCity(): Promise<void> {
     const PHASE: Record<string, string> = {
       stopping: ' · road blocked: stopping',
       uturn: ' · turning around (Hybrid A*)',
+      parking: ' · parking (Hybrid A*, relative sensing)',
+      parked: ' · parked',
       stuck: ' · stuck',
       arrived: sim.mission ? ' · mission complete' : ' · arrived',
     }
     const mission = sim.mission ? ` · checkpoint ${Math.min(sim.mission.reached + 1, sim.mission.checkpoints.length)}/${sim.mission.checkpoints.length}` : ''
-    const togo = (sim.phase === 'driving' ? ` · ${sim.remaining.toFixed(0)} m to go` : PHASE[sim.phase] ?? '') + mission
+    const parkingTask = sim.parkingGoal && sim.phase === 'driving' ? ' · to the parking lot' : ''
+    const togo = (sim.phase === 'driving' ? ` · ${sim.remaining.toFixed(0)} m to go` : PHASE[sim.phase] ?? '') + mission + parkingTask
     const mpc = f ? ` · MPC ${f.solver.lastMillis.toFixed(1)} ms` : ''
     hud.setStatus(`${street} · ${speed}${limit}${togo}${mpc}`)
     hud.chart(

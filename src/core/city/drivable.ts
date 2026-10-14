@@ -57,7 +57,9 @@ export function drivableGrid(
     fillPolygon(map, origin, free, ring, 1)
   }
   for (const poly of extraFree) fillPolygon(map, origin, free, poly, 1)
-  for (const poly of obstacles) fillPolygon(map, origin, free, poly, 0)
+  // obstacles are rasterized conservatively: grown by half a cell diagonal, so that a cell is a
+  // wall whenever the obstacle touches it (otherwise the measured clearance could exceed the real one)
+  for (const poly of obstacles) fillPolygon(map, origin, free, inflateConvex(poly, cellSize * Math.SQRT1_2), 0)
 
   const walls: number[] = []
   for (let i = 0; i < free.length; i++) if (!free[i]) walls.push(i)
@@ -89,4 +91,29 @@ function inside(xs: number[], ys: number[], x: number, y: number): boolean {
     if (ys[i] > y !== ys[j] > y && x < ((xs[j] - xs[i]) * (y - ys[i])) / (ys[j] - ys[i]) + xs[i]) hit = !hit
   }
   return hit
+}
+
+/** Grows a convex polygon by `d` (mitered corners). */
+export function inflateConvex(poly: Vec2[], d: number): Vec2[] {
+  const n = poly.length
+  let area = 0
+  for (let i = 0; i < n; i++) {
+    const a = poly[i]
+    const b = poly[(i + 1) % n]
+    area += a.x * b.y - b.x * a.y
+  }
+  const sign = area > 0 ? 1 : -1
+  // outward normal of edge i (from vertex i to i+1)
+  const normal = (i: number) => {
+    const a = poly[i]
+    const b = poly[(i + 1) % n]
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1
+    return { x: (sign * (b.y - a.y)) / len, y: (-sign * (b.x - a.x)) / len }
+  }
+  return poly.map((p, i) => {
+    const n1 = normal((i - 1 + n) % n)
+    const n2 = normal(i)
+    const k = d / (1 + n1.x * n2.x + n1.y * n2.y)
+    return { x: p.x + (n1.x + n2.x) * k, y: p.y + (n1.y + n2.y) * k }
+  })
 }

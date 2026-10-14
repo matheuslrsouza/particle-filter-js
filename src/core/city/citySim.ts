@@ -11,10 +11,11 @@ import { advancePose, type VehicleParams, type VehicleState } from '../vehicle/b
 import type { Segment as WallSegment } from '../world/map'
 import type { CityDef } from './cityDef'
 import { drivableGrid } from './drivable'
+import { buildParking, parkedPose, rectangle, spotsBetweenCars, type ParkingLot, type ParkingSpot } from './parking'
 import { buildLaneGraph, type LaneGraph } from './roadNetwork'
 import { DEFAULT_ROUTING, locate, planRoute, pointAt, snapToLane, type LanePosition, type Route } from './routing'
 
-export type CityPhase = 'idle' | 'driving' | 'stopping' | 'uturn' | 'arrived' | 'stuck'
+export type CityPhase = 'idle' | 'driving' | 'stopping' | 'uturn' | 'parking' | 'parked' | 'arrived' | 'stuck'
 
 /** A barricade across a whole road. */
 export interface Barrier {
@@ -25,15 +26,36 @@ export interface Barrier {
   faces: WallSegment[]
 }
 
-/** Hybrid A* for a real-size car: the footprint is four circles along the axis (rear axle at 0). */
+/** Body of the city car (a sedan): length, width, and how far it extends behind the rear axle. */
+export const CITY_CAR = { length: 5.04, width: 1.95, rearOverhang: 0.78 }
+
+const front = CITY_CAR.length - CITY_CAR.rearOverhang
+const half = CITY_CAR.width / 2
+
+/**
+ * Hybrid A* for the real-size car. Footprint: five circles as wide as the car along its axis
+ * (they don't reach past the bumpers), plus the corners and the middle of each side checked
+ * explicitly.
+ */
 export const CITY_HYBRID: HybridParams = {
   ...DEFAULT_HYBRID,
   wheelbase: 2.8,
   // maneuvers are planned at 85% of the steering limit, leaving the controller room to correct
   maxSteer: 0.6 * 0.85,
   step: 1,
-  circleOffsets: [0.47, 1.32, 2.16, 3.01],
-  radius: 1.25,
+  circleOffsets: [0.22, 0.98, 1.74, 2.5, 3.26],
+  radius: 1,
+  corners: [
+    { x: -CITY_CAR.rearOverhang, y: -half },
+    { x: -CITY_CAR.rearOverhang, y: half },
+    { x: front, y: -half },
+    { x: front, y: half },
+    { x: -CITY_CAR.rearOverhang, y: 0 },
+    { x: front, y: 0 },
+    { x: front / 2 - CITY_CAR.rearOverhang / 2, y: -half },
+    { x: front / 2 - CITY_CAR.rearOverhang / 2, y: half },
+  ],
+  cornerClearance: 0.1,
   reverseCost: 1.5,
   switchCost: 3,
   comfort: 1.6,
@@ -118,8 +140,11 @@ export class CitySim {
   blockedLanes = new Set<number>()
   /** last forward lidar scan, in world coordinates (from the real car) */
   lidarRays: { from: Vec2; to: Vec2; hit: boolean }[] = []
-  /** the last U-turn maneuver (world coordinates) */
+  /** the last maneuver, U-turn or parking (world coordinates) */
   maneuver: { result: HybridResult; path: PathPose[]; origin: Vec2 } | null = null
+  readonly parking: ParkingLot[]
+  /** the spot of a parking mission and where the car enters its lot */
+  parkingGoal: { spot: ParkingSpot; entrance: Vec2; lotExit: Vec2 } | null = null
   onMessage: (msg: string) => void = () => {}
   mpc: MpcParams = structuredClone(CITY_MPC)
   localization: Localization = 'ekf'
@@ -144,6 +169,7 @@ export class CitySim {
   ) {
     this.rng = new Rng(seed)
     this.graph = buildLaneGraph(city)
+    this.parking = buildParking(city)
     this.reset()
   }
 
@@ -174,6 +200,7 @@ export class CitySim {
     this.barriers = []
     this.blockedLanes.clear()
     this.maneuver = null
+    this.parkingGoal = null
     this.lidarRays = []
     this.barrierVersion++
     this.routeVersion++
@@ -226,6 +253,45 @@ export class CitySim {
     }
     this.mission = null
     return false
+  }
+
+  /**
+   * Parking mission: drive to a lot and park in a free spot between two parked cars (like the
+   * parking task of the Urban Challenge). Lots come from OpenStreetMap, spots are laid out in them.
+   */
+  startParking(): boolean {
+    const candidates = this.parking.filter((l) => spotsBetweenCars(l).length)
+    for (let attempt = 0; attempt < 20 && candidates.length; attempt++) {
+      const lot = candidates[this.rng.int(candidates.length)]
+      const spots = spotsBetweenCars(lot)
+      const spot = spots[this.rng.int(spots.length)]
+      // where the lot is closest to a street: the car leaves the road there
+      let best: { entrance: Vec2; lotExit: Vec2; d: number } | null = null
+      for (let i = 0; i < lot.outline.length; i++) {
+        const a = lot.outline[i]
+        const b = lot.outline[(i + 1) % lot.outline.length]
+        for (let t = 0.1; t < 1; t += 0.2) {
+          const p = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+          const pos = snapToLane(this.graph, p)
+          if (!pos) continue
+          const d = Math.hypot(pos.point.x - p.x, pos.point.y - p.y)
+          if (!best || d < best.d) best = { entrance: pos.point, lotExit: p, d }
+        }
+      }
+      if (!best || best.d > 25) continue
+      this.mission = null
+      this.targets = [best.entrance]
+      if (!this.planToTargets()) continue
+      this.parkingGoal = { spot, entrance: best.entrance, lotExit: best.lotExit }
+      this.onMessage('Parking mission: park between the two cars.')
+      return true
+    }
+    return false
+  }
+
+  /** Parked cars of all lots, as footprints (for planning and drawing). */
+  parkedCars(): Vec2[][] {
+    return this.parking.flatMap((l) => l.spots.filter((s) => s.occupied).map((s) => rectangle(s.center, s.heading, CITY_CAR.length, CITY_CAR.width)))
   }
 
   /**
@@ -318,29 +384,34 @@ export class CitySim {
     this.localize(odo, dt)
     if (this.tickCount % 5 === 0) this.scanAhead()
     const f = this.follower
-    if ((this.phase === 'driving' || this.phase === 'stopping' || this.phase === 'uturn') && f) {
+    if ((this.phase === 'driving' || this.phase === 'stopping' || this.phase === 'uturn' || this.phase === 'parking') && f) {
       ;[a, w] = f.control(this.estimate, odo.speed, odo.steer, dt)
       if (this.phase === 'driving') {
         this.routeIndex = f.index
         this.checkpointProgress()
       }
       // a maneuver segment the car stopped close to (but not exactly at) counts as done
-      if (this.phase === 'uturn') {
+      if (this.phase === 'uturn' || this.phase === 'parking') {
         this.stillTime = Math.abs(odo.speed) < 0.05 ? this.stillTime + dt : 0
         const end = f.gear.points[f.gear.points.length - 1]
         if (this.stillTime > 1.5 && Math.hypot(end.x - this.estimate.x, end.y - this.estimate.y) < 2) f.segmentDone = true
       }
       if (f.segmentDone) {
         this.stillTime = 0
-        if (this.phase === 'driving') {
+        if (this.phase === 'driving' && this.parkingGoal) {
+          this.planParking()
+        } else if (this.phase === 'driving') {
           this.phase = 'arrived'
           if (this.mission) this.mission.reached = this.mission.checkpoints.length
           this.onMessage(this.mission ? 'Mission complete!' : 'Destination reached!')
         } else if (this.phase === 'stopping') {
           this.planUturn()
         } else if (!f.done) {
-          // U-turn: next forward/reverse segment
+          // maneuver: next forward/reverse segment
           f.next()
+        } else if (this.phase === 'parking') {
+          this.phase = 'parked'
+          this.onMessage('Parked!')
         } else {
           this.maneuver = null
           this.routeVersion++
@@ -428,6 +499,47 @@ export class CitySim {
     this.onMessage(`Road blocked ${nearest.toFixed(0)} m ahead! Stopping.`)
   }
 
+  /** Hybrid A* from the lot entrance into the spot, around the parked cars. */
+  private planParking(): void {
+    const goal = this.parkingGoal!
+    const e = this.estimate
+    const lot = this.parking.find((l) => l.id === goal.spot.lot)!
+    // a driveway from the street into the lot (OSM lots don't carry their entrances)
+    const dx = goal.lotExit.x - goal.entrance.x
+    const dy = goal.lotExit.y - goal.entrance.y
+    const len = Math.hypot(dx, dy) || 1
+    const driveway = rectangle(
+      { x: (goal.entrance.x + goal.lotExit.x) / 2 + (dx / len) * 1.5, y: (goal.entrance.y + goal.lotExit.y) / 2 + (dy / len) * 1.5 },
+      Math.atan2(dy, dx),
+      len + 6,
+      7,
+    )
+    const center = { x: (e.x + goal.spot.center.x) / 2, y: (e.y + goal.spot.center.y) / 2 }
+    const size = Math.min(110, Math.max(60, Math.hypot(e.x - goal.spot.center.x, e.y - goal.spot.center.y) * 1.3 + 30))
+    const grid = drivableGrid(this.graph, center, size, 0.5, this.parkedCars(), [lot.outline, driveway])
+    const o = grid.origin
+    const params = { ...CITY_HYBRID, goalTolerance: 0.25, goalHeadingTolerance: 0.1, maxExpansions: 40_000 }
+    // the chosen spot first, then other spots between two cars in the same lot
+    const spots = [goal.spot, ...spotsBetweenCars(lot).filter((s) => s !== goal.spot)].slice(0, 5)
+    for (const spot of spots) {
+      for (const frontIn of [true, false]) {
+        const target = parkedPose(spot, frontIn)
+        const result = hybridAStar(grid.map, { x: e.x - o.x, y: e.y - o.y, theta: e.theta }, { x: target.x - o.x, y: target.y - o.y, theta: target.theta, useHeading: true }, params)
+        if (!result) continue
+        const path = result.path.map((q) => ({ ...q, x: q.x + o.x, y: q.y + o.y }))
+        this.maneuver = { result, path, origin: o }
+        this.parkingGoal = { ...goal, spot }
+        this.follower = new MpcFollower(splitByGear(path), { ...this.mpc, forwardSpeed: 1.5, reverseSpeed: 1, aLat: 1.2, curvatureWindow: 0 })
+        this.phase = 'parking'
+        this.routeVersion++
+        this.onMessage(`Parking ${frontIn ? 'front' : 'back'} in (Hybrid A*).`)
+        return
+      }
+    }
+    this.phase = 'stuck'
+    this.onMessage('Could not find a way into the spot.')
+  }
+
   /** U-turn with Hybrid A* on the local drivable surface, ending in the opposite lane. */
   private planUturn(): void {
     const e = this.estimate
@@ -482,6 +594,15 @@ export class CitySim {
     }
     const m = this.localization
     this.estimate = m === 'ekf' ? this.ekf.pose : m === 'gps' ? { ...this.gpsPose } : m === 'odometry' ? { ...this.deadReckoning } : { x: this.car.x, y: this.car.y, theta: this.car.theta }
+    if (this.phase === 'parking') {
+      // parking relies on relative sensing (ultrasonic sensors, cameras, lidar against the parked
+      // cars), centimeter-accurate around the car, not on GPS
+      this.estimate = {
+        x: this.rng.gaussian(this.car.x, 0.03),
+        y: this.rng.gaussian(this.car.y, 0.03),
+        theta: wrapAngle(this.rng.gaussian(this.car.theta, 0.005)),
+      }
+    }
     this.locError = Math.hypot(this.estimate.x - this.car.x, this.estimate.y - this.car.y)
   }
 

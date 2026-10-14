@@ -115,12 +115,16 @@ const hash01 = (id: number) => {
 
 const buildings: CityDef['buildings'] = []
 const parks: CityDef['parks'] = []
+const parking: CityDef['parking'] = []
 for (const w of ways) {
   const t = w.tags
   if (!t || w.nodes.length < 4) continue
   const pts = w.nodes.slice(0, -1).map((id) => nodes.get(id)).filter((n): n is OsmNode => !!n).map(local)
   if (pts.length < 3 || !pts.every(inside)) continue
-  if (t.building) {
+  if (t.amenity === 'parking') {
+    // surface lots only (garages are buildings)
+    if (!/underground|multi-storey|rooftop/.test(t.parking ?? '') && !t.building) parking.push({ id: w.id, pts })
+  } else if (t.building) {
     const levels = Number(t['building:levels'])
     const area = polygonArea(pts)
     // without data, estimate from the footprint: small houses get one floor, larger blocks more
@@ -140,6 +144,7 @@ const city: CityDef = {
   roads,
   buildings,
   parks,
+  parking,
 }
 writeFileSync(new URL('../src/maps/city-mountain-view.json', import.meta.url), JSON.stringify(city))
-console.log(`city ${city.width} x ${city.height} m: ${roads.length} roads, ${buildings.length} buildings, ${parks.length} parks`)
+console.log(`city ${city.width} x ${city.height} m: ${roads.length} roads, ${buildings.length} buildings, ${parks.length} parks, ${parking.length} parking lots`)

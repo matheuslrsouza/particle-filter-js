@@ -1,5 +1,5 @@
 import { wrapAngle } from '../math/angles'
-import type { Pose } from '../math/vec'
+import type { Pose, Vec2 } from '../math/vec'
 import { advancePose } from '../vehicle/bicycle'
 import type { KnownMap } from '../world/knownMap'
 import { gridDistance } from './gridDistance'
@@ -30,6 +30,13 @@ export interface HybridParams {
   heuristicWeight: number
   /** try to reach the goal pose exactly with a Reeds-Shepp curve (Dolgov's analytic expansion) */
   analyticExpansion: boolean
+  /**
+   * optional points of the car body (car frame: x forward from the rear axle, y to the right),
+   * e.g. its corners, that must keep `cornerClearance` from walls; circles alone can't cover a
+   * rectangle's corners without overshooting its front and back
+   */
+  corners?: Vec2[]
+  cornerClearance?: number
 }
 
 export const DEFAULT_HYBRID: HybridParams = {
@@ -97,11 +104,23 @@ export function hybridAStar(map: KnownMap, start: Pose, goal: Goal, p: HybridPar
 
   // near the start the car may already be closer to a wall than the comfort radius
   const startClear = footprintClearance(map, start, p)
+  const cornerClear = (x: number, y: number, th: number) => {
+    let min = Infinity
+    const c = Math.cos(th)
+    const s = Math.sin(th)
+    for (const k of p.corners ?? []) min = Math.min(min, map.clearanceAt(x + c * k.x - s * k.y, y + s * k.x + c * k.y))
+    return min
+  }
+  const startCorners = cornerClear(start.x, start.y, start.theta)
   const collides = (x: number, y: number, th: number, nearStart: boolean) => {
     // near the start the car may be closer than the safety radius, but never get any closer
     const r = nearStart ? Math.min(p.radius, startClear) : p.radius
     for (const o of p.circleOffsets) {
       if (map.clearanceAt(x + Math.cos(th) * o, y + Math.sin(th) * o) < r) return true
+    }
+    if (p.corners) {
+      const need = nearStart ? Math.min(p.cornerClearance ?? 0, startCorners) : (p.cornerClearance ?? 0)
+      if (cornerClear(x, y, th) < need) return true
     }
     return false
   }
