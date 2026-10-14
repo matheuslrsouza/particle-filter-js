@@ -12,6 +12,12 @@ export const DEFAULT_NETWORK: NetworkParams = { laneWidth: 3.3, curbRadius: 4 }
 
 export type Turn = 'straight' | 'left' | 'right'
 
+/**
+ * Curbside strip per road type (m): US residential streets are ~10–11 m curb to curb because of
+ * the parking lanes; bigger roads have bike lanes or narrow shoulders.
+ */
+const SHOULDER: Record<string, number> = { residential: 2.2, unclassified: 2.2, living_street: 1.5, tertiary: 1.8, secondary: 1.2, primary: 0.6 }
+
 /** A piece of road between two junctions. */
 export interface Segment {
   id: number
@@ -20,9 +26,11 @@ export interface Segment {
   to: number
   /** centerline, trimmed so it stops at the edge of both junctions */
   center: Vec2[]
-  /** roadway extent to the right / left of the centerline, looking from `from` to `to` */
+  /** roadway extent (curb to centerline) to the right / left, looking from `from` to `to` */
   rightWidth: number
   leftWidth: number
+  /** curbside strip outside the travel lanes (parking / bike lane), included in the widths above */
+  shoulder: number
   /** lane ids per direction, index 0 = leftmost lane of that direction */
   forward: number[]
   backward: number[]
@@ -197,14 +205,16 @@ export function buildLaneGraph(city: CityDef, params: NetworkParams = DEFAULT_NE
         if (from !== to) {
           const oneway = road.lanesBackward === 0
           const center = road.centerTurnLane ? W / 2 : 0
+          const shoulder = SHOULDER[road.highway.replace('_link', '')] ?? 1
           const seg: Segment = {
             id: segments.length,
             road,
             from,
             to,
             center: pts,
-            rightWidth: oneway ? (road.lanesForward * W) / 2 : center + road.lanesForward * W,
-            leftWidth: oneway ? (road.lanesForward * W) / 2 : center + road.lanesBackward * W,
+            rightWidth: (oneway ? (road.lanesForward * W) / 2 : center + road.lanesForward * W) + shoulder,
+            leftWidth: (oneway ? (road.lanesForward * W) / 2 : center + road.lanesBackward * W) + shoulder,
+            shoulder,
             forward: [],
             backward: [],
           }

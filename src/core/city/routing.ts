@@ -116,7 +116,14 @@ function subPolyline(pts: Vec2[], from: number, to: number): Vec2[] {
  * cost a few seconds and lanes other than the rightmost are slightly penalized, so the car keeps
  * right unless it needs the left lane to turn left.
  */
-export function planRoute(g: LaneGraph, start: LanePosition, goal: LanePosition, p: RoutingParams = DEFAULT_ROUTING): Route | null {
+export function planRoute(
+  g: LaneGraph,
+  start: LanePosition,
+  goal: LanePosition,
+  p: RoutingParams = DEFAULT_ROUTING,
+  /** lanes that can't be entered (a blocked road); the start lane is allowed: the car is already on it */
+  blocked: Set<number> = new Set(),
+): Route | null {
   const maxSpeed = Math.max(...g.lanes.map((l) => l.speed))
   const keepRight = (lane: number) => (g.lanes[lane].right >= 0 ? 1 + p.keepRightCost : 1)
   const h = (lane: number) => {
@@ -146,6 +153,7 @@ export function planRoute(g: LaneGraph, start: LanePosition, goal: LanePosition,
     const remaining = Math.max(0, L.length - entryS[lane])
     const atEnd = cost[lane] + (remaining / L.speed) * keepRight(lane)
     const relax = (to: number, c: number, steps: RouteStep[], s0: number) => {
+      if (blocked.has(to)) return
       if (c < cost[to]) {
         cost[to] = c
         prev[to] = steps
