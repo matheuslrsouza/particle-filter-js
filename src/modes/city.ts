@@ -16,6 +16,7 @@ import {
   destinationPin,
   laneGraphView,
   parkingView,
+  PerceptionView,
   routeRibbon,
   targetSpot,
   TrafficView,
@@ -95,8 +96,9 @@ export async function startCity(): Promise<void> {
   const lots = parkingView(sim.parking, CITY_CAR)
   const spotHighlight = targetSpot()
   const trafficView = new TrafficView()
+  const perceptionView = new PerceptionView()
   let crosswalks = crosswalksView(sim.traffic?.crosswalks ?? [])
-  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line, lots, spotHighlight, trafficView.group, crosswalks)
+  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line, lots, spotHighlight, trafficView.group, crosswalks, perceptionView.group)
   scene.add(city3d.group, lanes, car.group, ghost.group, ellipse.mesh, gpsPoints, pin, mpcView.group)
 
   const view = {
@@ -141,6 +143,17 @@ export async function startCity(): Promise<void> {
   trafficF.add(traffic, 'cars', 0, 150, 5).name('Cars').onFinishChange(applyTraffic)
   trafficF.add(traffic, 'pedestrians', 0, 120, 5).name('Pedestrians').onFinishChange(applyTraffic)
   trafficF.close()
+  const percF = gui.addFolder('Perception & tracking')
+  const perc = { points: true, detections: false, tracks: true, predictions: true }
+  percF
+    .add(sim, 'perception', { 'Its own tracks (lidar + Kalman)': 'tracks', 'True positions (cheat)': 'truth' })
+    .name('Car reacts to')
+  percF.add(perc, 'points').name('Lidar points')
+  percF.add(perc, 'detections').name('Detections (L-shape)')
+  percF.add(perc, 'tracks').name('Tracks + velocity')
+  percF.add(perc, 'predictions').name('Predictions (3 s)')
+  const metricsView = { MOTA: '-', recall: '-', 'position error': '-', 'velocity error': '-', tracks: 0 }
+  for (const k of Object.keys(metricsView) as (keyof typeof metricsView)[]) percF.add(metricsView, k).listen().disable()
   const loc = gui.addFolder('Localization')
   loc
     .add(view, 'localization', { 'EKF (GPS + odometry)': 'ekf', 'GPS only': 'gps', 'Odometry only': 'odometry', 'True pose (cheat)': 'truth' })
@@ -284,6 +297,13 @@ export async function startCity(): Promise<void> {
     mpcView.group.visible = view.mpc && mpcActive
 
     trafficView.update(sim.traffic?.npcs ?? [], sim.traffic?.pedestrians ?? [], now / 1000)
+    perceptionView.update(perc.points ? sim.lidarPoints : [], perc.detections ? sim.detections : [], perc.tracks ? sim.tracker.tracks : [], perc.predictions ? sim.predictions : new Map())
+    const ms = sim.metrics.summary
+    metricsView.MOTA = ms.mota.toFixed(2)
+    metricsView.recall = `${(ms.recall * 100).toFixed(0)}%`
+    metricsView['position error'] = `${(ms.posErr * 100).toFixed(0)} cm`
+    metricsView['velocity error'] = `${ms.velErr.toFixed(2)} m/s`
+    metricsView.tracks = sim.tracker.tracks.filter((t) => t.confirmed).length
     sun.position.set(interp.x + sunOffset.x, sunOffset.y, interp.y + sunOffset.z)
     sun.target.position.set(interp.x, 0, interp.y)
     rig.update(interp, dt)

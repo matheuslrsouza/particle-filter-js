@@ -579,3 +579,88 @@ export class TrafficView {
     if (this.pedBody.instanceColor) this.pedBody.instanceColor.needsUpdate = true
   }
 }
+
+const trackColor = (id: number) => new THREE.Color().setHSL(((id * 0.618034) % 1 + 1) % 1, 0.85, 0.55)
+
+/**
+ * What the car perceives: lidar points (mapped geometry gray, the rest cyan), detected boxes
+ * (yellow), tracks (one color per id) with their velocity, and their predicted paths.
+ */
+export class PerceptionView {
+  readonly group = new THREE.Group()
+  readonly points: THREE.Points
+  readonly detections: THREE.LineSegments
+  readonly tracks: THREE.LineSegments
+  readonly predictions: THREE.LineSegments
+
+  constructor() {
+    this.points = new THREE.Points(
+      new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({ size: 0.35, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false }),
+    )
+    const lines = (opts: THREE.LineBasicMaterialParameters) => new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial(opts))
+    this.detections = lines({ color: 0xffd60a })
+    this.tracks = lines({ vertexColors: true })
+    this.predictions = lines({ vertexColors: true, transparent: true, opacity: 0.7 })
+    for (const o of [this.points, this.detections, this.tracks, this.predictions]) o.frustumCulled = false
+    this.group.add(this.points, this.detections, this.tracks, this.predictions)
+  }
+
+  update(
+    points: { x: number; y: number; mapped: boolean }[],
+    detections: { center: Vec2; heading: number; length: number; width: number }[],
+    tracks: { id: number; x: number[]; heading: number; length: number; width: number; confirmed: boolean }[],
+    predictions: Map<number, Vec2[]>,
+  ): void {
+    const pp = new Float32Array(points.length * 3)
+    const pc = new Float32Array(points.length * 3)
+    points.forEach((p, i) => {
+      pp.set([p.x, 1.0, p.y], i * 3)
+      pc.set(p.mapped ? [0.55, 0.6, 0.68] : [0, 0.9, 1], i * 3)
+    })
+    this.points.geometry.setAttribute('position', new THREE.BufferAttribute(pp, 3))
+    this.points.geometry.setAttribute('color', new THREE.BufferAttribute(pc, 3))
+
+    const box = (c: Vec2, h: number, l: number, w: number, y: number, out: number[]) => {
+      const r = rectangleCorners(c, h, l, w)
+      for (let i = 0; i < 4; i++) out.push(r[i].x, y, r[i].y, r[(i + 1) % 4].x, y, r[(i + 1) % 4].y)
+    }
+    const dpos: number[] = []
+    for (const d of detections) box(d.center, d.heading, d.length, d.width, 0.6, dpos)
+    this.detections.geometry.setAttribute('position', new THREE.Float32BufferAttribute(dpos, 3))
+
+    const tpos: number[] = []
+    const tcol: number[] = []
+    const ppos: number[] = []
+    const pcol: number[] = []
+    for (const t of tracks) {
+      if (!t.confirmed) continue
+      const color = trackColor(t.id)
+      const before = tpos.length
+      box({ x: t.x[0], y: t.x[1] }, t.heading, t.length, t.width, 1.6, tpos)
+      // velocity: where it will be in one second
+      tpos.push(t.x[0], 1.6, t.x[1], t.x[0] + t.x[2], 1.6, t.x[1] + t.x[3])
+      for (let k = before; k < tpos.length; k += 3) tcol.push(color.r, color.g, color.b)
+      const pred = predictions.get(t.id)
+      if (pred) {
+        let prev = { x: t.x[0], y: t.x[1] }
+        for (const q of pred) {
+          ppos.push(prev.x, 0.25, prev.y, q.x, 0.25, q.y)
+          pcol.push(color.r, color.g, color.b, color.r, color.g, color.b)
+          prev = q
+        }
+      }
+    }
+    this.tracks.geometry.setAttribute('position', new THREE.Float32BufferAttribute(tpos, 3))
+    this.tracks.geometry.setAttribute('color', new THREE.Float32BufferAttribute(tcol, 3))
+    this.predictions.geometry.setAttribute('position', new THREE.Float32BufferAttribute(ppos, 3))
+    this.predictions.geometry.setAttribute('color', new THREE.Float32BufferAttribute(pcol, 3))
+  }
+}
+
+function rectangleCorners(c: Vec2, heading: number, length: number, width: number): Vec2[] {
+  const ux = Math.cos(heading)
+  const uy = Math.sin(heading)
+  const k = (a: number, b: number) => ({ x: c.x + ux * a - uy * b, y: c.y + uy * a + ux * b })
+  return [k(-length / 2, -width / 2), k(length / 2, -width / 2), k(length / 2, width / 2), k(-length / 2, width / 2)]
+}
