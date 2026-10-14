@@ -413,3 +413,71 @@ export function checkpointMarker(n: number): THREE.Group {
   g.add(ring, pole, label)
   return g
 }
+
+/** Parking lots: surface, spot lines and the parked cars (instanced). */
+export function parkingView(lots: { outline: Vec2[]; spots: { center: Vec2; heading: number; occupied: boolean }[] }[], car: { length: number; width: number }): THREE.Group {
+  const group = new THREE.Group()
+  const surfaces: THREE.BufferGeometry[] = []
+  for (const lot of lots) {
+    const shape = new THREE.Shape(lot.outline.map((p) => new THREE.Vector2(p.x, -p.y)))
+    surfaces.push(new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2).translate(0, Y.road, 0))
+  }
+  if (surfaces.length) {
+    const mesh = new THREE.Mesh(
+      mergeGeometries(surfaces)!,
+      new THREE.MeshStandardMaterial({ color: 0x4a5059, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8 }),
+    )
+    mesh.receiveShadow = true
+    group.add(mesh)
+  }
+  // white lines between the spots
+  const lines = new FlatBuilder()
+  const spots = lots.flatMap((l) => l.spots)
+  for (const s of spots) {
+    const ux = Math.cos(s.heading)
+    const uy = Math.sin(s.heading)
+    for (const side of [-1.5, 1.5]) {
+      const a = { x: s.center.x - ux * 2.75 - uy * side, y: s.center.y - uy * 2.75 + ux * side }
+      const b = { x: s.center.x + ux * 2.75 - uy * side, y: s.center.y + uy * 2.75 + ux * side }
+      lines.ribbon([a, b], -0.06, 0.06, Y.marking)
+    }
+  }
+  group.add(lines.mesh(CITY_COLORS.white, 4))
+
+  // parked cars: body + cabin, instanced
+  const parked = spots.filter((s) => s.occupied)
+  const body = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(car.length, 0.8, car.width).translate(0, 0.65, 0),
+    new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.3 }),
+    parked.length,
+  )
+  const cabin = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(car.length * 0.5, 0.6, car.width * 0.85).translate(-car.length * 0.05, 1.35, 0),
+    new THREE.MeshStandardMaterial({ color: 0x1d2a44, roughness: 0.15, metalness: 0.6 }),
+    parked.length,
+  )
+  const colors = [0xe63946, 0xf1faee, 0x457b9d, 0x1d3557, 0xa8dadc, 0x2a9d8f, 0xe9c46a, 0x6c757d, 0x222222, 0xb5838d]
+  const m = new THREE.Matrix4()
+  const c = new THREE.Color()
+  parked.forEach((s, i) => {
+    m.makeRotationY(-s.heading).setPosition(s.center.x, 0, s.center.y)
+    body.setMatrixAt(i, m)
+    cabin.setMatrixAt(i, m)
+    body.setColorAt(i, c.setHex(colors[(i * 7) % colors.length]))
+  })
+  body.castShadow = cabin.castShadow = true
+  group.add(body, cabin)
+  return group
+}
+
+/** The spot to park in, highlighted. */
+export function targetSpot(): THREE.Mesh {
+  const geo = new THREE.PlaneGeometry(5.5, 3).rotateX(-Math.PI / 2)
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshBasicMaterial({ color: 0x39d353, transparent: true, opacity: 0.45, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -24 }),
+  )
+  mesh.position.y = 0.12
+  mesh.visible = false
+  return mesh
+}

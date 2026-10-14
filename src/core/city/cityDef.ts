@@ -23,4 +23,6 @@ export interface CityDef {
   roads: CityRoad[]
   buildings: { id: number; pts: [number, number][]; h: number }[]
   parks: { pts: [number, number][] }[]
+  /** surface parking lots */
+  parking: { id: number; pts: [number, number][] }[]
 }

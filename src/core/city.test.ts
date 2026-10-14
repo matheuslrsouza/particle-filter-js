@@ -13,7 +13,7 @@ const road = (id: number, name: string, pts: [number, number][], nodes: number[]
 // a "+" junction at (100, 100): Main St east-west with 2 lanes per direction,
 // Oak St one-way southbound with a single lane
 const fixture: CityDef = {
-  name: 'fixture', attribution: '', width: 200, height: 200, buildings: [], parks: [],
+  name: 'fixture', attribution: '', width: 200, height: 200, buildings: [], parks: [], parking: [],
   roads: [
     road(1, 'Main St', [[0, 100], [100, 100], [200, 100]], [1, 2, 3], 2, 2),
     road(2, 'Oak St', [[100, 0], [100, 100], [100, 200]], [4, 2, 5], 1, 0),

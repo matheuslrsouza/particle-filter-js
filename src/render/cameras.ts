@@ -37,20 +37,25 @@ export class CameraRig {
     this.setMode('orbit')
   }
 
-  setMode(mode: CameraMode): void {
+  /**
+   * `focus` centers the orbit / top view on a point (e.g. the car) at `distance` meters, instead
+   * of framing the whole area.
+   */
+  setMode(mode: CameraMode, focus?: { x: number; y: number }, distance = 40): void {
     this.mode = mode
     const c = this.controls
     c.enabled = mode !== 'chase'
     c.enableRotate = mode === 'orbit'
+    const center = focus ? new THREE.Vector3(focus.x, 0, focus.y) : this.center
     if (mode === 'orbit') {
-      const size = Math.max(this.world.width, this.world.height)
-      this.camera.position.set(this.center.x, size * 0.75, this.center.z + size * 0.8)
-      c.target.copy(this.center)
+      const size = focus ? distance : Math.max(this.world.width, this.world.height)
+      this.camera.position.set(center.x, size * 0.75, center.z + size * 0.8)
+      c.target.copy(center)
     } else if (mode === 'top') {
-      const fit = (Math.max(this.world.height, this.world.width / this.camera.aspect) / 2) * 1.15
+      const fit = focus ? distance / 2 : (Math.max(this.world.height, this.world.width / this.camera.aspect) / 2) * 1.15
       const h = fit / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) + 2
-      this.camera.position.set(this.center.x, h, this.center.z + 0.001)
-      c.target.copy(this.center)
+      this.camera.position.set(center.x, h, center.z + 0.001)
+      c.target.copy(center)
     }
     c.update()
   }
