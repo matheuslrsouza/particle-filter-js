@@ -1,15 +1,51 @@
+import { splitByGear } from '../control/gearFollower'
 import { DEFAULT_MPC, MpcFollower, type MpcParams } from '../control/mpc'
 import { DEFAULT_EKF, Ekf } from '../localization/ekf'
 import { wrapAngle } from '../math/angles'
 import { DEFAULT_ODOMETRY, GPS_FILTER_STD, GPS_GRADES, Gps, readOdometry, type GpsGrade, type OdometryParams } from '../sensors/gps'
 import { Rng } from '../math/rng'
 import { clamp, type Pose, type Vec2 } from '../math/vec'
+import { DEFAULT_HYBRID, hybridAStar, type HybridParams, type HybridResult, type PathPose } from '../planning/hybridAStar'
+import { castRay } from '../sensors/lidar'
 import { advancePose, type VehicleParams, type VehicleState } from '../vehicle/bicycle'
+import type { Segment as WallSegment } from '../world/map'
 import type { CityDef } from './cityDef'
+import { drivableGrid } from './drivable'
 import { buildLaneGraph, type LaneGraph } from './roadNetwork'
-import { locate, planRoute, pointAt, snapToLane, type Route } from './routing'
+import { DEFAULT_ROUTING, locate, planRoute, pointAt, snapToLane, type LanePosition, type Route } from './routing'
 
-export type CityPhase = 'idle' | 'driving' | 'arrived'
+export type CityPhase = 'idle' | 'driving' | 'stopping' | 'uturn' | 'arrived' | 'stuck'
+
+/** A barricade across a whole road. */
+export interface Barrier {
+  segment: number
+  /** footprint polygon */
+  poly: Vec2[]
+  /** faces seen by the lidar */
+  faces: WallSegment[]
+}
+
+/** Hybrid A* for a real-size car: the footprint is four circles along the axis (rear axle at 0). */
+export const CITY_HYBRID: HybridParams = {
+  ...DEFAULT_HYBRID,
+  wheelbase: 2.8,
+  // maneuvers are planned at 85% of the steering limit, leaving the controller room to correct
+  maxSteer: 0.6 * 0.85,
+  step: 1,
+  circleOffsets: [0.47, 1.32, 2.16, 3.01],
+  radius: 1.25,
+  reverseCost: 1.5,
+  switchCost: 3,
+  comfort: 1.6,
+  wallCost: 0.5,
+  goalTolerance: 0.7,
+  maxExpansions: 30_000,
+}
+
+const LIDAR_ANGLES = Array.from({ length: 31 }, (_, i) => ((i - 15) / 15) * ((35 * Math.PI) / 180))
+const LIDAR_RANGE = 50
+/** the lidar sits on the front of the car */
+const LIDAR_OFFSET = 3.5
 
 /** What the car believes its pose is: the EKF fusion, one sensor alone, or the truth. */
 export type Localization = 'ekf' | 'gps' | 'odometry' | 'truth'
@@ -73,6 +109,17 @@ export class CitySim {
   telemetry: CityTelemetry[] = []
   /** index of the closest route point, for the HUD */
   routeIndex = 0
+  /** waypoints still to visit (a destination, or the remaining mission checkpoints) */
+  targets: Vec2[] = []
+  mission: { checkpoints: Vec2[]; reached: number } | null = null
+  barriers: Barrier[] = []
+  barrierVersion = 0
+  /** lanes the router must avoid (blocked roads) */
+  blockedLanes = new Set<number>()
+  /** last forward lidar scan, in world coordinates (from the real car) */
+  lidarRays: { from: Vec2; to: Vec2; hit: boolean }[] = []
+  /** the last U-turn maneuver (world coordinates) */
+  maneuver: { result: HybridResult; path: PathPose[]; origin: Vec2 } | null = null
   onMessage: (msg: string) => void = () => {}
   mpc: MpcParams = structuredClone(CITY_MPC)
   localization: Localization = 'ekf'
@@ -89,6 +136,7 @@ export class CitySim {
   private deadReckoning!: Pose
   private gpsPose!: Pose
   private tickCount = 0
+  private stillTime = 0
 
   constructor(
     readonly city: CityDef,
@@ -121,6 +169,13 @@ export class CitySim {
     this.destination = null
     this.telemetry = []
     this.phase = 'idle'
+    this.targets = []
+    this.mission = null
+    this.barriers = []
+    this.blockedLanes.clear()
+    this.maneuver = null
+    this.lidarRays = []
+    this.barrierVersion++
     this.routeVersion++
   }
 
@@ -137,17 +192,100 @@ export class CitySim {
 
   /** Routes from the car to the lane point closest to `target`. */
   setDestination(target: Vec2): boolean {
-    const start = locate(this.graph, this.estimate)
     const goal = snapToLane(this.graph, target)
-    if (!start || !goal) return false
-    const route = planRoute(this.graph, start, goal)
-    if (!route || route.path.length < 3) {
-      this.onMessage('No route to that point (one-way streets or outside the network).')
-      return false
+    if (!goal) return false
+    this.mission = null
+    this.targets = [goal.point]
+    if (this.planToTargets()) return true
+    this.onMessage('No route to that point (one-way streets or outside the network).')
+    return false
+  }
+
+  /**
+   * A mission like the DARPA Urban Challenge MDF: checkpoints to visit in order, spread over
+   * the city. The route goes through all of them without stopping.
+   */
+  startMission(count = 4): boolean {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const checkpoints: Vec2[] = []
+      let from: Vec2 = this.estimate
+      for (let tries = 0; checkpoints.length < count && tries < 200; tries++) {
+        const l = this.graph.lanes[this.rng.int(this.graph.lanes.length)]
+        if (l.length < 40) continue
+        const p = pointAt(l.points, l.length / 2)
+        if (Math.hypot(p.x - from.x, p.y - from.y) < 250) continue
+        checkpoints.push(p)
+        from = p
+      }
+      this.targets = [...checkpoints]
+      this.mission = { checkpoints, reached: 0 }
+      if (checkpoints.length === count && this.planToTargets()) {
+        this.onMessage(`Mission: ${count} checkpoints`)
+        return true
+      }
     }
-    this.route = route
-    this.destination = goal.point
-    this.follower = new MpcFollower([{ dir: 1, points: route.path, speedLimit: route.speedLimit }], this.mpc)
+    this.mission = null
+    return false
+  }
+
+  /**
+   * Puts a barricade across a two-way road on the route, at least `ahead` meters in front of the
+   * car (like the Urban Challenge blocked roads: the car must turn around and find another way).
+   */
+  placeBarrierAhead(ahead = 70): boolean {
+    if (!this.route || this.phase !== 'driving') return false
+    const path = this.route.path
+    for (let k = 0; k < 40; k++) {
+      const idx = this.routeIndex + Math.round((ahead + k * 10) / 0.5)
+      if (idx >= path.length - 20) break
+      const p = path[idx]
+      const pos = snapToLane(this.graph, p, p.theta)
+      if (!pos || Math.hypot(pos.point.x - p.x, pos.point.y - p.y) > 0.8) continue
+      const lane = this.graph.lanes[pos.lane]
+      const seg = this.graph.segments[lane.segment]
+      // a two-way street (a U-turn across a median is impossible), with room before the barrier
+      // to stop and turn around on the same street
+      if (!seg.forward.length || !seg.backward.length) continue
+      if (pos.s < 40 || pos.s > lane.length - 8) continue
+      // barricade across the whole roadway (and a bit of sidewalk), facing the segment direction
+      const c = projectOnPolyline(seg.center, p)
+      const n = { x: -Math.sin(c.heading), y: Math.cos(c.heading) }
+      const t = { x: Math.cos(c.heading), y: Math.sin(c.heading) }
+      const r = seg.rightWidth + 0.5
+      const l = seg.leftWidth + 0.5
+      const corner = (side: number, along: number) => ({ x: c.point.x + n.x * side + t.x * along, y: c.point.y + n.y * side + t.y * along })
+      const poly = [corner(r, -0.3), corner(r, 0.3), corner(-l, 0.3), corner(-l, -0.3)]
+      this.barriers.push({ segment: seg.id, poly, faces: [{ a: poly[0], b: poly[3] }, { a: poly[1], b: poly[2] }] })
+      for (const id of [...seg.forward, ...seg.backward]) this.blockedLanes.add(id)
+      this.barrierVersion++
+      this.onMessage('A road ahead was blocked (the car does not know yet).')
+      return true
+    }
+    return false
+  }
+
+  /** Chains routes through the remaining targets, avoiding blocked lanes. */
+  private planToTargets(): boolean {
+    let start: LanePosition | null = locate(this.graph, this.estimate)
+    if (!start || !this.targets.length) return false
+    const path: PathPose[] = []
+    const speedLimit: number[] = []
+    const names: string[] = []
+    for (const target of this.targets) {
+      const goal = snapToLane(this.graph, target)
+      if (!goal) return false
+      const leg = planRoute(this.graph, start!, goal, DEFAULT_ROUTING, this.blockedLanes)
+      if (!leg || leg.path.length < 2) return false
+      const skip = path.length ? 1 : 0
+      path.push(...leg.path.slice(skip))
+      speedLimit.push(...leg.speedLimit.slice(skip))
+      names.push(...leg.names.slice(skip))
+      start = goal
+    }
+    if (path.length < 3) return false
+    this.route = { steps: [], path, speedLimit, names, length: path.length * 0.5 }
+    this.destination = this.targets[this.targets.length - 1]
+    this.follower = new MpcFollower([{ dir: 1, points: path, speedLimit }], this.mpc)
     this.routeIndex = 0
     this.phase = 'driving'
     this.routeVersion++
@@ -172,22 +310,50 @@ export class CitySim {
     this.time += dt
     this.tickCount++
     const car = this.car
-    let a = car.speed > 0 ? -this.mpc.brake : 0
+    // default: brake to a stop and straighten the wheels
+    let a = -Math.sign(car.speed) * Math.min(this.mpc.brake, Math.abs(car.speed) / dt)
     let w = -Math.sign(car.steer) * Math.min(Math.abs(car.steer) / dt, this.mpc.maxSteerRate)
     // the car's own sensors
     const odo = readOdometry(car.speed, car.steer, this.odometry, this.rng)
     this.localize(odo, dt)
+    if (this.tickCount % 5 === 0) this.scanAhead()
     const f = this.follower
-    if (this.phase === 'driving' && f) {
+    if ((this.phase === 'driving' || this.phase === 'stopping' || this.phase === 'uturn') && f) {
       ;[a, w] = f.control(this.estimate, odo.speed, odo.steer, dt)
-      this.routeIndex = f.index
+      if (this.phase === 'driving') {
+        this.routeIndex = f.index
+        this.checkpointProgress()
+      }
+      // a maneuver segment the car stopped close to (but not exactly at) counts as done
+      if (this.phase === 'uturn') {
+        this.stillTime = Math.abs(odo.speed) < 0.05 ? this.stillTime + dt : 0
+        const end = f.gear.points[f.gear.points.length - 1]
+        if (this.stillTime > 1.5 && Math.hypot(end.x - this.estimate.x, end.y - this.estimate.y) < 2) f.segmentDone = true
+      }
       if (f.segmentDone) {
-        this.phase = 'arrived'
-        this.onMessage('Destination reached!')
+        this.stillTime = 0
+        if (this.phase === 'driving') {
+          this.phase = 'arrived'
+          if (this.mission) this.mission.reached = this.mission.checkpoints.length
+          this.onMessage(this.mission ? 'Mission complete!' : 'Destination reached!')
+        } else if (this.phase === 'stopping') {
+          this.planUturn()
+        } else if (!f.done) {
+          // U-turn: next forward/reverse segment
+          f.next()
+        } else {
+          this.maneuver = null
+          this.routeVersion++
+          if (this.planToTargets()) this.onMessage('Rerouting around the blocked road.')
+          else {
+            this.phase = 'stuck'
+            this.onMessage('No route avoiding the blocked road.')
+          }
+        }
       }
     }
     car.steer = clamp(car.steer + w * dt, -CITY_VEHICLE.maxSteer, CITY_VEHICLE.maxSteer)
-    car.speed = Math.max(0, car.speed + a * dt)
+    car.speed = car.speed + a * dt
     advancePose(car, car.speed, car.steer, dt, CITY_VEHICLE.wheelbase)
     car.odometer += car.speed * dt
 
@@ -202,6 +368,101 @@ export class CitySim {
       })
       if (this.telemetry.length > 300) this.telemetry.shift()
     }
+  }
+
+  /** Marks mission checkpoints as reached when the car passes them. */
+  private checkpointProgress(): void {
+    if (!this.mission || this.targets.length < 2) return
+    const t = this.targets[0]
+    if (Math.hypot(t.x - this.estimate.x, t.y - this.estimate.y) < 6) {
+      this.targets.shift()
+      this.mission.reached++
+      this.onMessage(`Checkpoint ${this.mission.reached}/${this.mission.checkpoints.length}`)
+    }
+  }
+
+  /**
+   * Forward lidar against the barricades. A hit on the route ahead makes the car stop before it;
+   * the sensor is on the real car, the decision uses the estimated pose.
+   */
+  private scanAhead(): void {
+    const car = this.car
+    const faces = this.barriers.flatMap((b) => b.faces)
+    const ox = car.x + Math.cos(car.theta) * LIDAR_OFFSET
+    const oy = car.y + Math.sin(car.theta) * LIDAR_OFFSET
+    this.lidarRays = []
+    let nearest = Infinity
+    let bearing = 0
+    for (const ang of LIDAR_ANGLES) {
+      const a = car.theta + ang
+      const d = faces.length ? castRay(ox, oy, Math.cos(a), Math.sin(a), faces, LIDAR_RANGE) : LIDAR_RANGE
+      this.lidarRays.push({ from: { x: ox, y: oy }, to: { x: ox + Math.cos(a) * d, y: oy + Math.sin(a) * d }, hit: d < LIDAR_RANGE })
+      if (d < nearest) {
+        nearest = d
+        bearing = ang
+      }
+    }
+    if (this.phase !== 'driving' || !this.route || nearest > 45) return
+    // the obstacle in the frame of the estimated pose
+    const e = this.estimate
+    const hx = e.x + Math.cos(e.theta) * LIDAR_OFFSET + Math.cos(e.theta + bearing) * nearest
+    const hy = e.y + Math.sin(e.theta) * LIDAR_OFFSET + Math.sin(e.theta + bearing) * nearest
+    const path = this.route.path
+    let hitIdx = -1
+    let best = Infinity
+    for (let i = this.routeIndex; i < Math.min(path.length, this.routeIndex + 140); i++) {
+      const d = Math.hypot(path[i].x - hx, path[i].y - hy)
+      if (d < best) {
+        best = d
+        hitIdx = i
+      }
+    }
+    // only obstacles on the road ahead count
+    if (hitIdx < 0 || best > 4) return
+    const stopIdx = Math.max(this.routeIndex + 2, hitIdx - 16)
+    this.follower = new MpcFollower(
+      [{ dir: 1, points: path.slice(this.routeIndex, stopIdx + 1), speedLimit: this.route.speedLimit.slice(this.routeIndex, stopIdx + 1) }],
+      this.mpc,
+    )
+    this.phase = 'stopping'
+    this.onMessage(`Road blocked ${nearest.toFixed(0)} m ahead! Stopping.`)
+  }
+
+  /** U-turn with Hybrid A* on the local drivable surface, ending in the opposite lane. */
+  private planUturn(): void {
+    const e = this.estimate
+    const opposite = snapToLane(this.graph, e, e.theta + Math.PI)
+    if (!opposite) {
+      this.phase = 'stuck'
+      this.onMessage('No opposite lane to turn around into.')
+      return
+    }
+    const grid = drivableGrid(this.graph, e, 60, 0.5, this.barriers.map((b) => b.poly))
+    const o = grid.origin
+    const lane = this.graph.lanes[opposite.lane]
+    for (const extra of [8, 14, 20]) {
+      const s = Math.min(lane.length - 1, opposite.s + extra)
+      const p = pointAt(lane.points, s)
+      const q = pointAt(lane.points, Math.min(lane.length, s + 1))
+      const goal = { x: p.x - o.x, y: p.y - o.y, theta: Math.atan2(q.y - p.y, q.x - p.x), useHeading: true }
+      const result = hybridAStar(grid.map, { x: e.x - o.x, y: e.y - o.y, theta: e.theta }, goal, CITY_HYBRID)
+      if (!result) continue
+      const path = result.path.map((q) => ({ ...q, x: q.x + o.x, y: q.y + o.y }))
+      this.maneuver = { result, path, origin: o }
+      this.follower = new MpcFollower(splitByGear(path), {
+        ...this.mpc,
+        forwardSpeed: 1.8,
+        reverseSpeed: 1.2,
+        aLat: 1.5,
+        curvatureWindow: 0,
+      })
+      this.phase = 'uturn'
+      this.routeVersion++
+      this.onMessage('Turning around (Hybrid A*).')
+      return
+    }
+    this.phase = 'stuck'
+    this.onMessage('Could not find a U-turn here.')
   }
 
   private localize(odo: { speed: number; steer: number }, dt: number): void {
@@ -259,4 +520,26 @@ export class CitySim {
     if (!this.route || !this.follower) return 0
     return Math.max(0, this.follower.distanceToSegmentEnd(this.estimate))
   }
+}
+
+/** Closest point of a polyline and the heading of the polyline there. */
+function projectOnPolyline(pts: Vec2[], p: Vec2): { point: Vec2; heading: number } {
+  let best = Infinity
+  let out = { point: pts[0], heading: 0 }
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]
+    const b = pts[i]
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const len2 = dx * dx + dy * dy
+    if (len2 === 0) continue
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+    const q = { x: a.x + dx * t, y: a.y + dy * t }
+    const d = Math.hypot(p.x - q.x, p.y - q.y)
+    if (d < best) {
+      best = d
+      out = { point: q, heading: Math.atan2(dy, dx) }
+    }
+  }
+  return out
 }

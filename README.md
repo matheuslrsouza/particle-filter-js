@@ -50,6 +50,8 @@ Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain Vie
   - The simulated GPS has a slowly wandering error (Gauss-Markov), like real receivers, so no filter can remove it alone. Pick the receiver in the panel: **RTK** (~2 cm, robotaxi development), **dual-frequency** (~0.5 m, default) or **consumer** (~1.5 m). With a consumer GPS the car visibly drifts in its lane. That is the motivation for lane detection with a camera (next step).
   - *Car uses* compares the EKF with a single sensor: GPS only jumps around, odometry only drifts away.
   - The wireframe ghost car is where the car believes it is, with its 2σ ellipse. GPS fixes are green (accepted) or red (rejected).
+- **Urban Challenge missions**: *Start mission* picks checkpoints spread over the city (like the DARPA MDF), and the car drives through them in order. Markers turn green as they are reached.
+- **Blocked roads**: *Block a road ahead* puts barricades across a two-way street of the route. The car doesn't know about them until its **forward lidar** (31 beams, 50 m) sees them. Then it stops, **turns around with Hybrid A\*** on a local grid of the drivable surface (back-and-forth maneuvers on narrow streets, planned at 85% of the steering limit to leave the controller some room), and reroutes on the lane graph avoiding that road. US residential streets are modeled curb to curb (~11 m with the parking lanes), which is what makes the U-turns possible.
 - The data is converted once and committed (`src/maps/city-mountain-view.json`). To regenerate: `npx vite-node scripts/fetch-osm.ts && npx vite-node scripts/build-city.ts`.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.

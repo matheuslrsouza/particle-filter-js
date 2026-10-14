@@ -111,9 +111,11 @@ function roads(g: LaneGraph): THREE.Group {
     asphalt.ribbon(c, -s.leftWidth, s.rightWidth, Y.road)
     sidewalk.ribbon(c, s.rightWidth, s.rightWidth + 2, Y.sidewalk)
     sidewalk.ribbon(c, -s.leftWidth - 2, -s.leftWidth, Y.sidewalk)
-    // edge lines
-    white.ribbon(c, s.rightWidth - 0.35, s.rightWidth - 0.2, Y.marking)
-    white.ribbon(c, -s.leftWidth + 0.2, -s.leftWidth + 0.35, Y.marking)
+    // edge lines at the edge of the travel lanes (the shoulder / parking strip is outside)
+    const re = s.rightWidth - s.shoulder
+    const le = s.leftWidth - s.shoulder
+    white.ribbon(c, re - 0.15, re, Y.marking)
+    white.ribbon(c, -le, -le + 0.15, Y.marking)
     const road = s.road
     const oneway = road.lanesBackward === 0
     if (!oneway) {
@@ -339,5 +341,75 @@ export function destinationPin(): THREE.Group {
   pole.castShadow = head.castShadow = true
   g.add(pole, head)
   g.visible = false
+  return g
+}
+
+function stripesTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 64
+  c.height = 16
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, 64, 16)
+  ctx.fillStyle = '#ff6a00'
+  for (let x = -16; x < 64; x += 16) {
+    ctx.beginPath()
+    ctx.moveTo(x, 16)
+    ctx.lineTo(x + 8, 0)
+    ctx.lineTo(x + 16, 0)
+    ctx.lineTo(x + 8, 16)
+    ctx.fill()
+  }
+  const t = new THREE.CanvasTexture(c)
+  t.wrapS = THREE.RepeatWrapping
+  t.colorSpace = THREE.SRGBColorSpace
+  return t
+}
+
+/** Striped barricades along a barrier footprint (4 corners: the long sides are 0-3 and 1-2). */
+export function barricade(poly: Vec2[]): THREE.Group {
+  const group = new THREE.Group()
+  const a = { x: (poly[0].x + poly[1].x) / 2, y: (poly[0].y + poly[1].y) / 2 }
+  const b = { x: (poly[3].x + poly[2].x) / 2, y: (poly[3].y + poly[2].y) / 2 }
+  const len = Math.hypot(b.x - a.x, b.y - a.y)
+  const tex = stripesTexture()
+  tex.repeat.set(len / 1.2, 1)
+  const board = new THREE.Mesh(
+    new THREE.BoxGeometry(len, 0.35, 0.12),
+    new THREE.MeshStandardMaterial({ map: tex, emissive: 0x331100, roughness: 0.6 }),
+  )
+  board.position.y = 0.9
+  const legs = new THREE.MeshStandardMaterial({ color: 0xdddddd })
+  for (let k = 0; k <= Math.floor(len / 2.5); k++) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.9, 0.5), legs)
+    leg.position.set(-len / 2 + 0.3 + k * ((len - 0.6) / Math.max(1, Math.floor(len / 2.5))), 0.45, 0)
+    group.add(leg)
+  }
+  board.castShadow = true
+  group.add(board)
+  group.position.set((a.x + b.x) / 2, 0, (a.y + b.y) / 2)
+  group.rotation.y = -Math.atan2(b.y - a.y, b.x - a.x)
+  return group
+}
+
+/** A numbered checkpoint marker. */
+export function checkpointMarker(n: number): THREE.Group {
+  const g = new THREE.Group()
+  const c = document.createElement('canvas')
+  c.width = c.height = 64
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.font = 'bold 44px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(String(n), 32, 34)
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }))
+  label.scale.set(3, 3, 1)
+  label.position.y = 8.5
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffc300, emissive: 0x553300, transparent: true, opacity: 0.9 })
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(3, 0.25, 8, 32).rotateX(Math.PI / 2), mat)
+  ring.position.y = 0.3
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7, 8).translate(0, 3.5, 0), mat)
+  g.add(ring, pole, label)
   return g
 }

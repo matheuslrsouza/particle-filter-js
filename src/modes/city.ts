@@ -8,8 +8,8 @@ import type { Pose } from '../core/math/vec'
 import { Belief3d } from '../render/belief3d'
 import { CameraRig, type CameraMode } from '../render/cameras'
 import { Car3d } from '../render/car3d'
-import { createCity3d, destinationPin, laneGraphView, routeRibbon } from '../render/city3d'
-import { MpcView } from '../render/explore3d'
+import { barricade, checkpointMarker, createCity3d, destinationPin, laneGraphView, routeRibbon } from '../render/city3d'
+import { EXPLORE_COLORS, MpcView, PlanLine, SearchTree } from '../render/explore3d'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
 import { addModeSelector } from '../ui/mode'
@@ -65,6 +65,18 @@ export async function startCity(): Promise<void> {
   const mpcView = new MpcView()
   mpcView.group.position.y = 0.15
   let route: THREE.Mesh | null = null
+  const barriers = new THREE.Group()
+  const checkpoints = new THREE.Group()
+  const lidarGeo = new THREE.BufferGeometry()
+  const lidarLines = new THREE.LineSegments(
+    lidarGeo,
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false }),
+  )
+  lidarLines.frustumCulled = false
+  // the U-turn maneuver: Hybrid A* search tree and path (in the local grid frame)
+  const maneuverTree = new SearchTree()
+  const maneuverPath = new PlanLine(EXPLORE_COLORS.plan, 0.4)
+  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line)
   scene.add(city3d.group, lanes, car.group, ghost.group, ellipse.mesh, gpsPoints, pin, mpcView.group)
 
   const view = {
@@ -88,6 +100,10 @@ export async function startCity(): Promise<void> {
   simF.add(view, 'paused').name('Pause')
   simF.add(view, 'timeScale', 0.25, 4, 0.25).name('Speed ×')
   simF.add({ go: () => sim.randomDestination() }, 'go').name('Random destination')
+  simF.add({ mission: () => sim.startMission(4) }, 'mission').name('Start mission (4 checkpoints)')
+  simF
+    .add({ block: () => sim.placeBarrierAhead(70) || hud.message('Drive first: the barricade goes on a two-way street of the route.') }, 'block')
+    .name('Block a road ahead')
   simF.add({ reset: () => sim.reset() }, 'reset').name('Reset car')
   simF.add(view, 'camera', { Chase: 'chase', Orbit: 'orbit', 'Top-down': 'top' }).name('Camera').onChange((m: CameraMode) => rig.setMode(m))
   const loc = gui.addFolder('Localization')
@@ -129,8 +145,9 @@ export async function startCity(): Promise<void> {
     rig.resize(container.clientWidth, container.clientHeight)
   })
 
-  // start with a drive, so the demo moves by itself
-  setTimeout(() => sim.randomDestination(), 600)
+  // start with a mission, so the demo moves by itself
+  setTimeout(() => sim.startMission(4) || sim.randomDestination(), 600)
+  let barrierVersion = -1
 
   let routeVersion = -1
   let acc = 0
@@ -163,10 +180,47 @@ export async function startCity(): Promise<void> {
       }
       route = sim.route ? routeRibbon(sim.route.path) : null
       if (route) scene.add(route)
-      pin.visible = !!sim.destination
+      pin.visible = !!sim.destination && !sim.mission
       if (sim.destination) pin.position.set(sim.destination.x, 0, sim.destination.y)
+      checkpoints.clear()
+      sim.mission?.checkpoints.forEach((c, i) => {
+        const m = checkpointMarker(i + 1)
+        m.position.set(c.x, 0, c.y)
+        checkpoints.add(m)
+      })
+      const mv = sim.maneuver
+      maneuverPath.set(mv ? mv.path : null)
+      if (mv) {
+        maneuverTree.set(mv.result.treeForward, mv.result.treeReverse, now / 1000, mv.result.analytic)
+        maneuverTree.group.position.set(mv.origin.x, 0.25, mv.origin.y)
+      } else maneuverTree.clear()
     }
-    if (route) route.visible = view.route && sim.phase === 'driving'
+    if (sim.barrierVersion !== barrierVersion) {
+      barrierVersion = sim.barrierVersion
+      barriers.clear()
+      for (const b of sim.barriers) barriers.add(barricade(b.poly))
+    }
+    // checkpoint colors: reached green, next gold, later dim
+    checkpoints.children.forEach((m, i) => {
+      const reached = sim.mission ? i < sim.mission.reached : false
+      const next = sim.mission ? i === sim.mission.reached : false
+      m.traverse((o) => {
+        if (o instanceof THREE.Mesh) (o.material as THREE.MeshStandardMaterial).color.setHex(reached ? 0x39d353 : next ? 0xffc300 : 0x9aa4b1)
+      })
+    })
+    maneuverTree.animate(now / 1000)
+    maneuverTree.group.visible = maneuverPath.line.visible = sim.phase === 'uturn'
+    const lp = new Float32Array(sim.lidarRays.length * 6)
+    const lc = new Float32Array(sim.lidarRays.length * 6)
+    sim.lidarRays.forEach((r, i) => {
+      lp.set([r.from.x, 1.2, r.from.y, r.to.x, 1.2, r.to.y], i * 6)
+      const c = r.hit ? [1, 0.25, 0.2] : [0.8, 0.9, 1]
+      lc.set([...c, ...c], i * 6)
+    })
+    lidarGeo.setAttribute('position', new THREE.BufferAttribute(lp, 3))
+    lidarGeo.setAttribute('color', new THREE.BufferAttribute(lc, 3))
+    lidarLines.visible = sim.barriers.length > 0
+    if (route) route.visible = view.route && (sim.phase === 'driving' || sim.phase === 'stopping')
     // the car model's units are the maze car's: its odometer must be scaled back for the wheels
     car.update(interp, sim.car.steer, sim.car.odometer / (CITY_VEHICLE.wheelbase / 0.5), view.paused ? 0 : dt)
     ghost.update(sim.estimate, sim.car.steer, 0, 0)
@@ -196,7 +250,14 @@ export async function startCity(): Promise<void> {
     const street = sim.street || 'Mountain View'
     const speed = `${(sim.car.speed * KMH).toFixed(0)} km/h`
     const limit = t?.limit ? ` (limit ${(t.limit * KMH).toFixed(0)})` : ''
-    const togo = sim.phase === 'driving' ? ` · ${sim.remaining.toFixed(0)} m to go` : sim.phase === 'arrived' ? ' · arrived' : ''
+    const PHASE: Record<string, string> = {
+      stopping: ' · road blocked: stopping',
+      uturn: ' · turning around (Hybrid A*)',
+      stuck: ' · stuck',
+      arrived: sim.mission ? ' · mission complete' : ' · arrived',
+    }
+    const mission = sim.mission ? ` · checkpoint ${Math.min(sim.mission.reached + 1, sim.mission.checkpoints.length)}/${sim.mission.checkpoints.length}` : ''
+    const togo = (sim.phase === 'driving' ? ` · ${sim.remaining.toFixed(0)} m to go` : PHASE[sim.phase] ?? '') + mission
     const mpc = f ? ` · MPC ${f.solver.lastMillis.toFixed(1)} ms` : ''
     hud.setStatus(`${street} · ${speed}${limit}${togo}${mpc}`)
     hud.chart(
