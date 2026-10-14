@@ -46,7 +46,10 @@ Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain Vie
 - Buildings are extruded from their footprints (height from `building:levels`, otherwise estimated from the footprint area). Parks, sidewalks, lane markings and trees complete the scene.
 - The *Lane graph* layer shows the lanes (cyan) and the connectors: straight (white), left (orange), right (green).
 - **Click a street** (or *Random destination*) and the car drives there. The route is the fastest one on the lane graph (A\*, travel time at the speed limits), keeping right and changing lanes only when needed, e.g. before a left turn. The car is real size (2.8 m wheelbase) and is driven by the same MPC as the maze, with a speed profile capped by each street's `maxspeed` that slows down for turns. The HUD shows the street name, speed vs limit and the lane error.
-- Localization is the true pose for now; an EKF (GPS + odometry) comes with the Urban Challenge missions.
+- **Localization is an EKF** that fuses a GPS with wheel odometry (wheel speed + steering angle). Its state is [x, y, θ, steering bias, wheel speed scale error], so it also learns the biases of the car's sensors. The heading and the biases are never measured: they become observable from the motion. GPS fixes are gated by Mahalanobis distance, which rejects multipath jumps.
+  - The simulated GPS has a slowly wandering error (Gauss-Markov), like real receivers, so no filter can remove it alone. Pick the receiver in the panel: **RTK** (~2 cm, robotaxi development), **dual-frequency** (~0.5 m, default) or **consumer** (~1.5 m). With a consumer GPS the car visibly drifts in its lane. That is the motivation for lane detection with a camera (next step).
+  - *Car uses* compares the EKF with a single sensor: GPS only jumps around, odometry only drifts away.
+  - The wireframe ghost car is where the car believes it is, with its 2σ ellipse. GPS fixes are green (accepted) or red (rejected).
 - The data is converted once and committed (`src/maps/city-mountain-view.json`). To regenerate: `npx vite-node scripts/fetch-osm.ts && npx vite-node scripts/build-city.ts`.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.
