@@ -11,7 +11,9 @@ import { advancePose, type VehicleParams, type VehicleState } from '../vehicle/b
 import type { Segment as WallSegment } from '../world/map'
 import type { CityDef } from './cityDef'
 import { drivableGrid } from './drivable'
-import { Traffic, type EgoState, NPC_LENGTH } from './traffic'
+import { cluster, detect, LIDAR_360, scan360, type Detection, type LidarPoint, type SceneSegment } from './perception'
+import { Tracker, TrackingMetrics } from './tracker'
+import { Traffic, type EgoState, NPC_LENGTH, NPC_WIDTH } from './traffic'
 import { buildParking, parkedPose, rectangle, spotsBetweenCars, type ParkingLot, type ParkingSpot } from './parking'
 import { buildLaneGraph, type LaneGraph } from './roadNetwork'
 import { DEFAULT_ROUTING, locate, planRoute, pointAt, snapToLane, type LanePosition, type Route } from './routing'
@@ -153,6 +155,19 @@ export class CitySim {
   yielding: '' | 'following' | 'junction' | 'pedestrian' = ''
   leaderGap = Infinity
   private egoHeld = new Set<number>()
+  /**
+   * what the car reacts to: the tracks of its own perception (lidar → clusters → Kalman tracks),
+   * or the true positions of the other road users (to compare)
+   */
+  perception: 'tracks' | 'truth' = 'tracks'
+  tracker = new Tracker()
+  metrics = new TrackingMetrics()
+  /** last lidar scan (world coordinates, placed with the estimated pose) and detections */
+  lidarPoints: LidarPoint[] = []
+  detections: Detection[] = []
+  /** predicted positions of each confirmed track over the next seconds */
+  predictions = new Map<number, Vec2[]>()
+  private staticScene: SceneSegment[] | null = null
   /** the spot of a parking mission and where the car enters its lot */
   parkingGoal: { spot: ParkingSpot; entrance: Vec2; lotExit: Vec2 } | null = null
   onMessage: (msg: string) => void = () => {}
@@ -194,6 +209,140 @@ export class CitySim {
     this.traffic = null
     this.egoHeld.clear()
     this.yielding = ''
+    this.tracker = new Tracker()
+    this.lidarPoints = []
+    this.detections = []
+    this.predictions.clear()
+  }
+
+  /** The other cars as the car knows them: its confirmed tracks, or the truth. */
+  perceivedCars(): { pose: Pose; v: number }[] {
+    if (this.perception === 'truth') return (this.traffic?.npcs ?? []).map((n) => ({ pose: n.pose, v: n.v }))
+    return this.tracker.tracks
+      .filter((t) => t.confirmed && t.kind === 'car')
+      .map((t) => ({ pose: { x: t.x[0], y: t.x[1], theta: t.heading }, v: this.tracker.speed(t) }))
+  }
+
+  /** Pedestrians as the car knows them (position and velocity). */
+  perceivedPedestrians(): { pos: Vec2; vel: Vec2 }[] {
+    if (this.perception === 'truth') {
+      return (this.traffic?.pedestrians ?? []).map((p) => ({
+        pos: p.pos,
+        vel: p.state === 'crossing' ? { x: Math.cos(p.heading) * p.speed, y: Math.sin(p.heading) * p.speed } : { x: 0, y: 0 },
+      }))
+    }
+    // tentative pedestrian tracks count too: better stop for a ghost than run someone over
+    return this.tracker.tracks.filter((t) => t.kind === 'pedestrian' && (t.confirmed || t.hits >= 2)).map((t) => ({ pos: { x: t.x[0], y: t.x[1] }, vel: { x: t.x[2], y: t.x[3] } }))
+  }
+
+  /**
+   * Perception at 10 Hz: 360° lidar from the roof, points on mapped geometry (buildings, parked
+   * cars, barricades) removed, clusters → L-shape boxes → Kalman tracks, then a prediction for
+   * each track. The scan comes from the real car but is placed with the estimated pose, as in a
+   * real car: localization errors show up in the tracks.
+   */
+  private perceive(): void {
+    const t = this.traffic
+    if (!t) return
+    if (!this.staticScene) {
+      this.staticScene = []
+      for (const b of this.city.buildings) {
+        for (let i = 0; i < b.pts.length; i++) {
+          const [x1, y1] = b.pts[i]
+          const [x2, y2] = b.pts[(i + 1) % b.pts.length]
+          this.staticScene.push({ a: { x: x1, y: y1 }, b: { x: x2, y: y2 }, mapped: true, object: -1 })
+        }
+      }
+      for (const poly of this.parkedCars()) {
+        for (let i = 0; i < 4; i++) this.staticScene.push({ a: poly[i], b: poly[(i + 1) % 4], mapped: true, object: -1 })
+      }
+    }
+    const scene = [...this.staticScene]
+    for (const bar of this.barriers) for (const f of bar.faces) scene.push({ a: f.a, b: f.b, mapped: true, object: -1 })
+    for (const n of t.npcs) {
+      const r = rectangle(n.pose, n.pose.theta, NPC_LENGTH, NPC_WIDTH)
+      for (let i = 0; i < 4; i++) scene.push({ a: r[i], b: r[(i + 1) % 4], mapped: false, object: n.id })
+    }
+    for (const p of t.pedestrians) {
+      const r = rectangle(p.pos, p.heading, 0.45, 0.45)
+      for (let i = 0; i < 4; i++) scene.push({ a: r[i], b: r[(i + 1) % 4], mapped: false, object: 1e6 + p.id })
+    }
+    // sensor on the roof, 1.5 m ahead of the rear axle
+    const c = this.car
+    const sensor = { x: c.x + Math.cos(c.theta) * 1.5, y: c.y + Math.sin(c.theta) * 1.5, theta: c.theta }
+    const raw = scan360(sensor, scene, LIDAR_360, this.rng)
+    // into the estimated frame
+    const e = this.estimate
+    const est = { x: e.x + Math.cos(e.theta) * 1.5, y: e.y + Math.sin(e.theta) * 1.5 }
+    const dth = e.theta - c.theta
+    const cd = Math.cos(dth)
+    const sd = Math.sin(dth)
+    this.lidarPoints = raw.map((q) => {
+      const rx = q.x - sensor.x
+      const ry = q.y - sensor.y
+      return { ...q, x: est.x + rx * cd - ry * sd, y: est.y + rx * sd + ry * cd }
+    })
+    this.detections = detect(cluster(this.lidarPoints, LIDAR_360.beams), est)
+    this.tracker.step(this.detections, 0.1)
+
+    // evaluation in the car's own frame (so localization errors don't count as tracking errors);
+    // an object counts as visible with at least 4 lidar points
+    const hits = new Map<number, number>()
+    for (const q of raw) if (!q.mapped) hits.set(q.object, (hits.get(q.object) ?? 0) + 1)
+    const seen = new Set([...hits].filter(([, n]) => n >= 4).map(([id]) => id))
+    const toEgo = (x: number, y: number, ref: Pose) => {
+      const dx = x - ref.x
+      const dy = y - ref.y
+      return { x: dx * Math.cos(ref.theta) + dy * Math.sin(ref.theta), y: -dx * Math.sin(ref.theta) + dy * Math.cos(ref.theta) }
+    }
+    const rotV = (vx: number, vy: number, th: number) => ({ x: vx * Math.cos(th) + vy * Math.sin(th), y: -vx * Math.sin(th) + vy * Math.cos(th) })
+    const truth: { id: number; x: number; y: number; vx: number; vy: number }[] = []
+    for (const n of t.npcs) {
+      if (!seen.has(n.id)) continue
+      const p = toEgo(n.pose.x, n.pose.y, c)
+      const v = rotV(Math.cos(n.pose.theta) * n.v, Math.sin(n.pose.theta) * n.v, c.theta)
+      truth.push({ id: n.id, x: p.x, y: p.y, vx: v.x, vy: v.y })
+    }
+    for (const p of t.pedestrians) {
+      if (!seen.has(1e6 + p.id)) continue
+      const q = toEgo(p.pos.x, p.pos.y, c)
+      const sp = p.state === 'crossing' ? p.speed : 0
+      const v = rotV(Math.cos(p.heading) * sp, Math.sin(p.heading) * sp, c.theta)
+      truth.push({ id: 1e6 + p.id, x: q.x, y: q.y, vx: v.x, vy: v.y })
+    }
+    const egoTracks = this.tracker.tracks.map((tr) => {
+      const p = toEgo(tr.x[0], tr.x[1], e)
+      const v = rotV(tr.x[2], tr.x[3], e.theta)
+      return { ...tr, x: [p.x, p.y, v.x, v.y] }
+    })
+    const others = [...t.npcs.map((n) => toEgo(n.pose.x, n.pose.y, c)), ...t.pedestrians.map((p) => toEgo(p.pos.x, p.pos.y, c))]
+    this.metrics.add(egoTracks, truth, others)
+
+    // predictions: cars along their lane, pedestrians at constant velocity (3 s)
+    this.predictions.clear()
+    for (const tr of this.tracker.tracks) {
+      if (!tr.confirmed) continue
+      const pts: Vec2[] = []
+      const sp = this.tracker.speed(tr)
+      const pos = tr.kind === 'car' && sp > 0.5 ? snapToLane(this.graph, { x: tr.x[0], y: tr.x[1] }, tr.heading) : null
+      if (pos && Math.hypot(pos.point.x - tr.x[0], pos.point.y - tr.x[1]) < 2.5) {
+        let lane = this.graph.lanes[pos.lane]
+        let s = pos.s
+        for (let k = 1; k <= 6; k++) {
+          s += sp * 0.5
+          while (s > lane.length && lane.next.length) {
+            s -= lane.length
+            // the most likely movement: straight on, else the first option
+            const next = lane.next.map((id) => this.graph.connectors[id]).sort((a, b) => (a.turn === 'straight' ? -1 : 0) - (b.turn === 'straight' ? -1 : 0))[0]
+            lane = this.graph.lanes[next.to]
+          }
+          pts.push(pointAt(lane.points, Math.min(s, lane.length)))
+        }
+      } else {
+        for (let k = 1; k <= 6; k++) pts.push({ x: tr.x[0] + tr.x[2] * k * 0.5, y: tr.x[1] + tr.x[3] * k * 0.5 })
+      }
+      this.predictions.set(tr.id, pts)
+    }
   }
 
   /** Puts the car on Castro Street (or the longest lane), 10 m into it. */
@@ -409,7 +558,10 @@ export class CitySim {
     // the car's own sensors
     const odo = readOdometry(car.speed, car.steer, this.odometry, this.rng)
     this.localize(odo, dt)
-    if (this.tickCount % 5 === 0) this.scanAhead()
+    if (this.tickCount % 5 === 0) {
+      this.scanAhead()
+      this.perceive()
+    }
     const f = this.follower
     if (this.traffic) this.stepTraffic(dt)
     if ((this.phase === 'driving' || this.phase === 'stopping' || this.phase === 'uturn' || this.phase === 'parking') && f) {
@@ -525,8 +677,8 @@ export class CitySim {
           this.egoHeld.delete(c)
         }
       }
-      // lead vehicles: any car close to the route ahead
-      for (const n of t.npcs) {
+      // lead vehicles: any car close to the route ahead (as perceived)
+      for (const n of this.perceivedCars()) {
         for (let i = i0; i < until; i += 2) {
           if (Math.hypot(n.pose.x - path[i].x, n.pose.y - path[i].y) < 1.6) {
             const along = Math.cos(n.pose.theta - path[i].theta)
@@ -536,18 +688,27 @@ export class CitySim {
           }
         }
       }
-      // safety net: anyone walking across the route ahead
-      for (const p of t.pedestrians) {
-        if (p.state !== 'crossing') continue
-        for (let i = i0; i < Math.min(until, i0 + 70); i += 2) {
-          if (Math.hypot(p.pos.x - path[i].x, p.pos.y - path[i].y) < 2) {
-            stops.push([(i - i0) * 0.5 - EGO_FRONT - 1.5, 0, 'pedestrian'])
-            break
-          }
+      // pedestrians on (or about to step onto) the route ahead: where they are now and in 1.5 s
+      const peds = this.perceivedPedestrians()
+      for (const p of peds) {
+        const moving = Math.hypot(p.vel.x, p.vel.y) > 0.3
+        const spots = moving ? [p.pos, { x: p.pos.x + p.vel.x * 1.5, y: p.pos.y + p.vel.y * 1.5 }] : [p.pos]
+        let hit = -1
+        for (let i = i0; i < Math.min(until, i0 + 70) && hit < 0; i += 2) {
+          if (spots.some((q) => Math.hypot(q.x - path[i].x, q.y - path[i].y) < 2)) hit = i
+        }
+        if (hit >= 0) stops.push([(hit - i0) * 0.5 - EGO_FRONT - 1.5, 0, 'pedestrian'])
+      }
+      // crosswalks with someone on them: someone between the two sidewalks
+      const active = new Set<number>()
+      for (const cw of t.crosswalks) {
+        const len = Math.hypot(cw.b.x - cw.a.x, cw.b.y - cw.a.y)
+        for (const p of peds) {
+          const u = ((p.pos.x - cw.a.x) * (cw.b.x - cw.a.x) + (p.pos.y - cw.a.y) * (cw.b.y - cw.a.y)) / (len * len)
+          const off = Math.abs((p.pos.y - cw.a.y) * (cw.b.x - cw.a.x) - (p.pos.x - cw.a.x) * (cw.b.y - cw.a.y)) / len
+          if (off < 1.2 && u * len > 0.6 && (1 - u) * len > 0.6) active.add(cw.id)
         }
       }
-      // crosswalks with someone on them
-      const active = t.activeCrosswalks()
       for (const cw of t.crosswalks) {
         if (!active.has(cw.id)) continue
         for (let i = i0; i < until - 1; i += 1) {
