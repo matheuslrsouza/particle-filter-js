@@ -38,6 +38,17 @@ Pick **Mode → Exploration** in the panel, or open `?mode=explore`. This recrea
 - If the car touches a wall end that slipped between lidar beams, the bumper maps it. The car then picks the short escape maneuver (forward/reverse × left/straight/right) that gains the most room, and replans.
 - Two maps: a generated 40 × 27.5 m maze and the Udacity map. The maze is a "perfect" maze (full of dead ends) with a few open plazas. Its seed was picked with `npx vite-node scripts/pick-maze.ts`, which simulates the exploration for many seeds and compares the distance driven with the optimal path. With seed 12 the car first explores a whole wrong region, then backs out of several dead ends (about 1.7× the optimal distance). Regenerate it with `node scripts/generate-maze.mjs [seed]`.
 
+## City mode (Mountain View, CA)
+
+Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain View (Castro Street and around) is rebuilt from **OpenStreetMap**:
+
+- Roads become a lane-level network for right-hand traffic: lanes per direction (from the `lanes` tags; an odd count on a two-way US street is read as a center turn lane), junctions, and connectors through each junction for the allowed movements (straight, right from the rightmost lane, left from the leftmost lane, no U-turns). Junctions that are too close together are merged into one composite intersection.
+- Buildings are extruded from their footprints (height from `building:levels`, otherwise estimated from the footprint area). Parks, sidewalks, lane markings and trees complete the scene.
+- The *Lane graph* layer shows the lanes (cyan) and the connectors: straight (white), left (orange), right (green).
+- The data is converted once and committed (`src/maps/city-mountain-view.json`). To regenerate: `npx vite-node scripts/fetch-osm.ts && npx vite-node scripts/build-city.ts`.
+
+Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.
+
 ## Running locally
 
 ```bash
@@ -60,7 +71,8 @@ src/
     planning/      A* (binary heap, 8-connected), Hybrid A* and path smoothing
     control/       MPC (iLQR) and speed profile, PID path follower (with forward/reverse gears), twiddle
     sim/           simulations: particle filter (known map) and exploration
-  modes/           the two app modes (known map / exploration)
+    city/          OpenStreetMap city: lane-level road network
+  modes/           the app modes (known map / exploration / city)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
   maps/            maps in meters (JSON)

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { Pose } from '../core/math/vec'
-import type { World } from '../core/world/map'
+import type { Area } from './scene'
 
 export type CameraMode = 'orbit' | 'chase' | 'top'
 
@@ -13,14 +13,18 @@ export class CameraRig {
   private chasePos = new THREE.Vector3()
   private chaseLook = new THREE.Vector3()
 
-  constructor(dom: HTMLElement, private world: World) {
+  constructor(
+    dom: HTMLElement,
+    private world: Area,
+    opts: { near?: number; far?: number; maxDistance?: number; minDistance?: number } = {},
+  ) {
     this.center = new THREE.Vector3(world.width / 2, 0, world.height / 2)
-    this.camera = new THREE.PerspectiveCamera(45, dom.clientWidth / dom.clientHeight, 0.05, 200)
+    this.camera = new THREE.PerspectiveCamera(45, dom.clientWidth / dom.clientHeight, opts.near ?? 0.05, opts.far ?? 200)
     this.controls = new OrbitControls(this.camera, dom)
     this.controls.enableDamping = true
     this.controls.maxPolarAngle = Math.PI / 2 - 0.05
-    this.controls.minDistance = 2
-    this.controls.maxDistance = 90
+    this.controls.minDistance = opts.minDistance ?? 2
+    this.controls.maxDistance = opts.maxDistance ?? 90
     this.setMode('orbit')
   }
 
