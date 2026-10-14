@@ -10,14 +10,23 @@ export class CameraRig {
   readonly controls: OrbitControls
   mode: CameraMode = 'orbit'
   private center: THREE.Vector3
+  private chase: { back: number; up: number; ahead: number }
   private chasePos = new THREE.Vector3()
   private chaseLook = new THREE.Vector3()
 
   constructor(
     dom: HTMLElement,
     private world: Area,
-    opts: { near?: number; far?: number; maxDistance?: number; minDistance?: number } = {},
+    opts: {
+      near?: number
+      far?: number
+      maxDistance?: number
+      minDistance?: number
+      /** chase camera placement relative to the car (m): behind, above, look-ahead */
+      chase?: { back: number; up: number; ahead: number }
+    } = {},
   ) {
+    this.chase = opts.chase ?? { back: 2.4, up: 1.6, ahead: 1.5 }
     this.center = new THREE.Vector3(world.width / 2, 0, world.height / 2)
     this.camera = new THREE.PerspectiveCamera(45, dom.clientWidth / dom.clientHeight, opts.near ?? 0.05, opts.far ?? 200)
     this.controls = new OrbitControls(this.camera, dom)
@@ -58,11 +67,12 @@ export class CameraRig {
       return
     }
     const dir = new THREE.Vector3(Math.cos(car.theta), 0, Math.sin(car.theta))
-    const wantPos = new THREE.Vector3(car.x, 1.6, car.y).addScaledVector(dir, -2.4)
-    const wantLook = new THREE.Vector3(car.x, 0.2, car.y).addScaledVector(dir, 1.5)
+    const { back, up, ahead } = this.chase
+    const wantPos = new THREE.Vector3(car.x, up, car.y).addScaledVector(dir, -back)
+    const wantLook = new THREE.Vector3(car.x, up * 0.125, car.y).addScaledVector(dir, ahead)
     const k = 1 - Math.exp(-dt * 4)
     // first frame, or the car was teleported (reset / kidnap): jump instead of flying across the map
-    if (this.chasePos.lengthSq() === 0 || this.chasePos.distanceTo(wantPos) > 6) {
+    if (this.chasePos.lengthSq() === 0 || this.chasePos.distanceTo(wantPos) > back * 2.5) {
       this.chasePos.copy(wantPos)
       this.chaseLook.copy(wantLook)
     }

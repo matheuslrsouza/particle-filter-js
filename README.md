@@ -45,6 +45,8 @@ Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain Vie
 - Roads become a lane-level network for right-hand traffic: lanes per direction (from the `lanes` tags; an odd count on a two-way US street is read as a center turn lane), junctions, and connectors through each junction for the allowed movements (straight, right from the rightmost lane, left from the leftmost lane, no U-turns). Junctions that are too close together are merged into one composite intersection.
 - Buildings are extruded from their footprints (height from `building:levels`, otherwise estimated from the footprint area). Parks, sidewalks, lane markings and trees complete the scene.
 - The *Lane graph* layer shows the lanes (cyan) and the connectors: straight (white), left (orange), right (green).
+- **Click a street** (or *Random destination*) and the car drives there. The route is the fastest one on the lane graph (A\*, travel time at the speed limits), keeping right and changing lanes only when needed, e.g. before a left turn. The car is real size (2.8 m wheelbase) and is driven by the same MPC as the maze, with a speed profile capped by each street's `maxspeed` that slows down for turns. The HUD shows the street name, speed vs limit and the lane error.
+- Localization is the true pose for now; an EKF (GPS + odometry) comes with the Urban Challenge missions.
 - The data is converted once and committed (`src/maps/city-mountain-view.json`). To regenerate: `npx vite-node scripts/fetch-osm.ts && npx vite-node scripts/build-city.ts`.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.
@@ -71,7 +73,7 @@ src/
     planning/      A* (binary heap, 8-connected), Hybrid A* and path smoothing
     control/       MPC (iLQR) and speed profile, PID path follower (with forward/reverse gears), twiddle
     sim/           simulations: particle filter (known map) and exploration
-    city/          OpenStreetMap city: lane-level road network
+    city/          OpenStreetMap city: lane-level road network, routing, city driving
   modes/           the app modes (known map / exploration / city)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
