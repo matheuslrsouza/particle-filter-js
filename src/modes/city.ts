@@ -8,7 +8,19 @@ import type { Pose } from '../core/math/vec'
 import { Belief3d } from '../render/belief3d'
 import { CameraRig, type CameraMode } from '../render/cameras'
 import { Car3d } from '../render/car3d'
-import { barricade, checkpointMarker, createCity3d, destinationPin, laneGraphView, parkingView, routeRibbon, targetSpot } from '../render/city3d'
+import {
+  barricade,
+  checkpointMarker,
+  createCity3d,
+  crosswalksView,
+  destinationPin,
+  laneGraphView,
+  parkingView,
+  PerceptionView,
+  routeRibbon,
+  targetSpot,
+  TrafficView,
+} from '../render/city3d'
 import { EXPLORE_COLORS, MpcView, PlanLine, SearchTree } from '../render/explore3d'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
@@ -20,6 +32,9 @@ export async function startCity(): Promise<void> {
   // the city data is only downloaded when this mode is opened
   const city = (await import('../maps/city-mountain-view.json')).default as unknown as CityDef
   const sim = new CitySim(city)
+  // the city mode comes with traffic (the simulation itself has it off by default)
+  const traffic = { cars: 40, pedestrians: 30 }
+  sim.enableTraffic(traffic.cars, traffic.pedestrians)
 
   const container = document.getElementById('app')!
   const renderer = createRenderer(container)
@@ -80,7 +95,10 @@ export async function startCity(): Promise<void> {
   const maneuverPath = new PlanLine(EXPLORE_COLORS.plan, 0.4)
   const lots = parkingView(sim.parking, CITY_CAR)
   const spotHighlight = targetSpot()
-  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line, lots, spotHighlight)
+  const trafficView = new TrafficView()
+  const perceptionView = new PerceptionView()
+  let crosswalks = crosswalksView(sim.traffic?.crosswalks ?? [])
+  scene.add(barriers, checkpoints, lidarLines, maneuverTree.group, maneuverPath.line, lots, spotHighlight, trafficView.group, crosswalks, perceptionView.group)
   scene.add(city3d.group, lanes, car.group, ghost.group, ellipse.mesh, gpsPoints, pin, mpcView.group)
 
   const view = {
@@ -114,6 +132,28 @@ export async function startCity(): Promise<void> {
     .add(view, 'camera', { Chase: 'chase', Orbit: 'orbit', 'Top-down': 'top', 'Whole city': 'city' as CameraMode })
     .name('Camera')
     .onChange((m: CameraMode | 'city') => (m === 'city' ? rig.setMode('top') : rig.setMode(m, sim.car, 60)))
+  const trafficF = gui.addFolder('Traffic')
+  const applyTraffic = () => {
+    if (traffic.cars || traffic.pedestrians) sim.enableTraffic(traffic.cars, traffic.pedestrians)
+    else sim.disableTraffic()
+    scene.remove(crosswalks)
+    crosswalks = crosswalksView(sim.traffic?.crosswalks ?? [])
+    scene.add(crosswalks)
+  }
+  trafficF.add(traffic, 'cars', 0, 150, 5).name('Cars').onFinishChange(applyTraffic)
+  trafficF.add(traffic, 'pedestrians', 0, 120, 5).name('Pedestrians').onFinishChange(applyTraffic)
+  trafficF.close()
+  const percF = gui.addFolder('Perception & tracking')
+  const perc = { points: true, detections: false, tracks: true, predictions: true }
+  percF
+    .add(sim, 'perception', { 'Its own tracks (lidar + Kalman)': 'tracks', 'True positions (cheat)': 'truth' })
+    .name('Car reacts to')
+  percF.add(perc, 'points').name('Lidar points')
+  percF.add(perc, 'detections').name('Detections (L-shape)')
+  percF.add(perc, 'tracks').name('Tracks + velocity')
+  percF.add(perc, 'predictions').name('Predictions (3 s)')
+  const metricsView = { MOTA: '-', recall: '-', 'position error': '-', 'velocity error': '-', tracks: 0 }
+  for (const k of Object.keys(metricsView) as (keyof typeof metricsView)[]) percF.add(metricsView, k).listen().disable()
   const loc = gui.addFolder('Localization')
   loc
     .add(view, 'localization', { 'EKF (GPS + odometry)': 'ekf', 'GPS only': 'gps', 'Odometry only': 'odometry', 'True pose (cheat)': 'truth' })
@@ -256,6 +296,14 @@ export async function startCity(): Promise<void> {
     if (mpcActive) mpcView.set(f!.predicted(), f!.reference)
     mpcView.group.visible = view.mpc && mpcActive
 
+    trafficView.update(sim.traffic?.npcs ?? [], sim.traffic?.pedestrians ?? [], now / 1000)
+    perceptionView.update(perc.points ? sim.lidarPoints : [], perc.detections ? sim.detections : [], perc.tracks ? sim.tracker.tracks : [], perc.predictions ? sim.predictions : new Map())
+    const ms = sim.metrics.summary
+    metricsView.MOTA = ms.mota.toFixed(2)
+    metricsView.recall = `${(ms.recall * 100).toFixed(0)}%`
+    metricsView['position error'] = `${(ms.posErr * 100).toFixed(0)} cm`
+    metricsView['velocity error'] = `${ms.velErr.toFixed(2)} m/s`
+    metricsView.tracks = sim.tracker.tracks.filter((t) => t.confirmed).length
     sun.position.set(interp.x + sunOffset.x, sunOffset.y, interp.y + sunOffset.z)
     sun.target.position.set(interp.x, 0, interp.y)
     rig.update(interp, dt)
@@ -274,9 +322,15 @@ export async function startCity(): Promise<void> {
     }
     const mission = sim.mission ? ` · checkpoint ${Math.min(sim.mission.reached + 1, sim.mission.checkpoints.length)}/${sim.mission.checkpoints.length}` : ''
     const parkingTask = sim.parkingGoal && sim.phase === 'driving' ? ' · to the parking lot' : ''
+    const YIELD: Record<string, string> = {
+      following: ` · following (gap ${Math.max(0, sim.leaderGap).toFixed(0)} m)`,
+      junction: ' · waiting at the junction',
+      pedestrian: ' · stopping for a pedestrian',
+    }
+    const reacting = sim.phase === 'driving' ? (YIELD[sim.yielding] ?? '') : ''
     const togo = (sim.phase === 'driving' ? ` · ${sim.remaining.toFixed(0)} m to go` : PHASE[sim.phase] ?? '') + mission + parkingTask
     const mpc = f ? ` · MPC ${f.solver.lastMillis.toFixed(1)} ms` : ''
-    hud.setStatus(`${street} · ${speed}${limit}${togo}${mpc}`)
+    hud.setStatus(`${street} · ${speed}${limit}${reacting}${togo}${mpc}`)
     hud.chart(
       [
         { label: 'speed', color: '#00e5ff', values: sim.telemetry.map((d) => d.speed * KMH), range: 60 },

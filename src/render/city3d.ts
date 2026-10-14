@@ -481,3 +481,186 @@ export function targetSpot(): THREE.Mesh {
   mesh.visible = false
   return mesh
 }
+
+/** Zebra stripes at the crosswalks. */
+export function crosswalksView(crosswalks: { a: Vec2; b: Vec2 }[]): THREE.Mesh {
+  const b = new FlatBuilder()
+  for (const cw of crosswalks) {
+    const dx = cw.b.x - cw.a.x
+    const dy = cw.b.y - cw.a.y
+    const len = Math.hypot(dx, dy)
+    if (len < 1) continue
+    const ux = dx / len
+    const uy = dy / len
+    // bars parallel to the traffic (perpendicular to the crosswalk), one every meter
+    for (let d = 1.3; d < len - 1.3; d += 1) {
+      const c = { x: cw.a.x + ux * d, y: cw.a.y + uy * d }
+      b.ribbon(
+        [
+          { x: c.x - uy * 1.5, y: c.y + ux * 1.5 },
+          { x: c.x + uy * 1.5, y: c.y - ux * 1.5 },
+        ],
+        -0.22,
+        0.22,
+        Y.marking,
+      )
+    }
+  }
+  return b.mesh(CITY_COLORS.white, 4)
+}
+
+/** Other cars and pedestrians, instanced and updated every frame. */
+export class TrafficView {
+  readonly group = new THREE.Group()
+  private body: THREE.InstancedMesh
+  private cabin: THREE.InstancedMesh
+  private pedBody: THREE.InstancedMesh
+  private pedHead: THREE.InstancedMesh
+  private m = new THREE.Matrix4()
+  private c = new THREE.Color()
+
+  constructor(maxCars = 150, maxPeds = 120, car = { length: 4.7, width: 1.85 }) {
+    this.body = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(car.length, 0.8, car.width).translate(0, 0.65, 0),
+      new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.3 }),
+      maxCars,
+    )
+    this.cabin = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(car.length * 0.5, 0.6, car.width * 0.85).translate(-car.length * 0.05, 1.35, 0),
+      new THREE.MeshStandardMaterial({ color: 0x1d2a44, roughness: 0.15, metalness: 0.6 }),
+      maxCars,
+    )
+    this.pedBody = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.2, 0.24, 1.25, 8).translate(0, 0.62, 0),
+      new THREE.MeshStandardMaterial({ roughness: 0.8 }),
+      maxPeds,
+    )
+    this.pedHead = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.15, 10, 8).translate(0, 1.42, 0),
+      new THREE.MeshStandardMaterial({ color: 0xe0b48a, roughness: 0.7 }),
+      maxPeds,
+    )
+    for (const mesh of [this.body, this.cabin, this.pedBody, this.pedHead]) {
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+      mesh.castShadow = true
+      mesh.frustumCulled = false
+      mesh.count = 0
+    }
+    this.group.add(this.body, this.cabin, this.pedBody, this.pedHead)
+  }
+
+  update(
+    cars: { pose: { x: number; y: number; theta: number }; color: number }[],
+    peds: { pos: Vec2; heading: number; state: string; color: number }[],
+    time: number,
+  ): void {
+    const n = Math.min(cars.length, this.body.instanceMatrix.count)
+    this.body.count = this.cabin.count = n
+    for (let i = 0; i < n; i++) {
+      const p = cars[i].pose
+      this.m.makeRotationY(-p.theta).setPosition(p.x, 0, p.y)
+      this.body.setMatrixAt(i, this.m)
+      this.cabin.setMatrixAt(i, this.m)
+      this.body.setColorAt(i, this.c.setHex(cars[i].color))
+    }
+    const k = Math.min(peds.length, this.pedBody.instanceMatrix.count)
+    this.pedBody.count = this.pedHead.count = k
+    for (let i = 0; i < k; i++) {
+      const p = peds[i]
+      // a little bounce while walking
+      const bob = p.state === 'crossing' ? Math.abs(Math.sin(time * 9 + i)) * 0.05 : 0
+      this.m.makeRotationY(-p.heading).setPosition(p.pos.x, bob, p.pos.y)
+      this.pedBody.setMatrixAt(i, this.m)
+      this.pedHead.setMatrixAt(i, this.m)
+      this.pedBody.setColorAt(i, this.c.setHex(p.color))
+    }
+    for (const mesh of [this.body, this.cabin, this.pedBody, this.pedHead]) mesh.instanceMatrix.needsUpdate = true
+    if (this.body.instanceColor) this.body.instanceColor.needsUpdate = true
+    if (this.pedBody.instanceColor) this.pedBody.instanceColor.needsUpdate = true
+  }
+}
+
+const trackColor = (id: number) => new THREE.Color().setHSL(((id * 0.618034) % 1 + 1) % 1, 0.85, 0.55)
+
+/**
+ * What the car perceives: lidar points (mapped geometry gray, the rest cyan), detected boxes
+ * (yellow), tracks (one color per id) with their velocity, and their predicted paths.
+ */
+export class PerceptionView {
+  readonly group = new THREE.Group()
+  readonly points: THREE.Points
+  readonly detections: THREE.LineSegments
+  readonly tracks: THREE.LineSegments
+  readonly predictions: THREE.LineSegments
+
+  constructor() {
+    this.points = new THREE.Points(
+      new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({ size: 0.35, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false }),
+    )
+    const lines = (opts: THREE.LineBasicMaterialParameters) => new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial(opts))
+    this.detections = lines({ color: 0xffd60a })
+    this.tracks = lines({ vertexColors: true })
+    this.predictions = lines({ vertexColors: true, transparent: true, opacity: 0.7 })
+    for (const o of [this.points, this.detections, this.tracks, this.predictions]) o.frustumCulled = false
+    this.group.add(this.points, this.detections, this.tracks, this.predictions)
+  }
+
+  update(
+    points: { x: number; y: number; mapped: boolean }[],
+    detections: { center: Vec2; heading: number; length: number; width: number }[],
+    tracks: { id: number; x: number[]; heading: number; length: number; width: number; confirmed: boolean }[],
+    predictions: Map<number, Vec2[]>,
+  ): void {
+    const pp = new Float32Array(points.length * 3)
+    const pc = new Float32Array(points.length * 3)
+    points.forEach((p, i) => {
+      pp.set([p.x, 1.0, p.y], i * 3)
+      pc.set(p.mapped ? [0.55, 0.6, 0.68] : [0, 0.9, 1], i * 3)
+    })
+    this.points.geometry.setAttribute('position', new THREE.BufferAttribute(pp, 3))
+    this.points.geometry.setAttribute('color', new THREE.BufferAttribute(pc, 3))
+
+    const box = (c: Vec2, h: number, l: number, w: number, y: number, out: number[]) => {
+      const r = rectangleCorners(c, h, l, w)
+      for (let i = 0; i < 4; i++) out.push(r[i].x, y, r[i].y, r[(i + 1) % 4].x, y, r[(i + 1) % 4].y)
+    }
+    const dpos: number[] = []
+    for (const d of detections) box(d.center, d.heading, d.length, d.width, 0.6, dpos)
+    this.detections.geometry.setAttribute('position', new THREE.Float32BufferAttribute(dpos, 3))
+
+    const tpos: number[] = []
+    const tcol: number[] = []
+    const ppos: number[] = []
+    const pcol: number[] = []
+    for (const t of tracks) {
+      if (!t.confirmed) continue
+      const color = trackColor(t.id)
+      const before = tpos.length
+      box({ x: t.x[0], y: t.x[1] }, t.heading, t.length, t.width, 1.6, tpos)
+      // velocity: where it will be in one second
+      tpos.push(t.x[0], 1.6, t.x[1], t.x[0] + t.x[2], 1.6, t.x[1] + t.x[3])
+      for (let k = before; k < tpos.length; k += 3) tcol.push(color.r, color.g, color.b)
+      const pred = predictions.get(t.id)
+      if (pred) {
+        let prev = { x: t.x[0], y: t.x[1] }
+        for (const q of pred) {
+          ppos.push(prev.x, 0.25, prev.y, q.x, 0.25, q.y)
+          pcol.push(color.r, color.g, color.b, color.r, color.g, color.b)
+          prev = q
+        }
+      }
+    }
+    this.tracks.geometry.setAttribute('position', new THREE.Float32BufferAttribute(tpos, 3))
+    this.tracks.geometry.setAttribute('color', new THREE.Float32BufferAttribute(tcol, 3))
+    this.predictions.geometry.setAttribute('position', new THREE.Float32BufferAttribute(ppos, 3))
+    this.predictions.geometry.setAttribute('color', new THREE.Float32BufferAttribute(pcol, 3))
+  }
+}
+
+function rectangleCorners(c: Vec2, heading: number, length: number, width: number): Vec2[] {
+  const ux = Math.cos(heading)
+  const uy = Math.sin(heading)
+  const k = (a: number, b: number) => ({ x: c.x + ux * a - uy * b, y: c.y + uy * a + ux * b })
+  return [k(-length / 2, -width / 2), k(length / 2, -width / 2), k(length / 2, width / 2), k(-length / 2, width / 2)]
+}

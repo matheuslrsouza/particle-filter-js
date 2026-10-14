@@ -54,6 +54,18 @@ Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain Vie
 - **Blocked roads**: *Block a road ahead* puts barricades across a two-way street of the route. The car doesn't know about them until its **forward lidar** (31 beams, 50 m) sees them. Then it stops, **turns around with Hybrid A\*** on a local grid of the drivable surface (back-and-forth maneuvers on narrow streets, planned at 85% of the steering limit to leave the controller some room), and reroutes on the lane graph avoiding that road. US residential streets are modeled curb to curb (~11 m with the parking lanes), which is what makes the U-turns possible.
 - **Parking** (*Park between two cars*): the surface lots of OpenStreetMap get rows of 90° spots, about 70% of them taken. The car drives to the lot, then parks in a free spot between two parked cars with **Hybrid A\*** (Reeds-Shepp shots, front or back in), around the parked cars. While parking, the car localizes with relative sensing (like the ultrasonic sensors and cameras of real cars), centimeter-accurate, instead of the GPS. The planner checks the real rectangle of the car (circles along its axis plus its corners), and obstacles are rasterized conservatively, so planned maneuvers never touch the parked cars.
 - The *Camera* menu's orbit and top-down views center on the car; *Whole city* frames the whole map.
+- **Traffic** (40 cars and 30 pedestrians by default, adjustable in the panel):
+  - Other cars drive the lane graph with random routes and the **IDM** (Intelligent Driver Model) for car following.
+  - Junctions use a **first-come-first-served reservation**: a car enters only if no conflicting movement (crossing or merging into the same lane) is using the junction, so compatible movements, like opposite straight ones, go together.
+  - Pedestrians wait at **crosswalks** near the junctions and cross when no car is about to arrive. Cars stop while someone is on the crosswalk.
+  - Our car follows the car ahead like an adaptive cruise control (the MPC gets a speed limit from the gap: v ≤ √(v_lead² + 2·b·(gap − s₀ − T·v_lead))), reserves junctions before entering them and stops for pedestrians. The HUD shows what it is reacting to.
+  - Known limitation: the simulation is flat, so roads crossing on a bridge (Shoreline Boulevard over Evelyn Avenue) can draw cars over each other.
+- **Perception and tracking** (panel *Perception & tracking*): by default our car does not see the others at their true positions, only what its own sensors tell it.
+  - A 360° roof **lidar** (360 beams, 60 m, 2 cm noise) hits buildings, parked cars, barricades, other cars and pedestrians. Points on known geometry (the map) are filtered out (gray); the rest (cyan) are grouped into clusters (scan-line segmentation plus merging of pieces split by occlusion).
+  - Each cluster becomes a detection: small ones are pedestrians; the others get an **L-shape fit** (Zhang et al., 2017) and a car-size prior that grows the box away from the sensor, since only the near sides are visible.
+  - A **multi-object tracker** keeps a constant-velocity **Kalman filter** per object: Hungarian association on Mahalanobis distances with a gate, tentative tracks confirmed after 3 hits in 5 scans and dropped after missing scans. Tracks are drawn in a color per id, with an arrow for the velocity (where it will be in 1 s).
+  - **Prediction**: tracked cars are projected 3 s ahead along the lane graph, pedestrians at constant velocity. Following, junction yielding and crosswalk stops use the tracks and predictions.
+  - The panel shows **CLEAR-MOT** metrics against the ground truth (MOTA, recall, position and velocity errors) and can switch the car back to *True positions* to compare.
 - The data is converted once and committed (`src/maps/city-mountain-view.json`). To regenerate: `npx vite-node scripts/fetch-osm.ts && npx vite-node scripts/build-city.ts`.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.
@@ -80,7 +92,7 @@ src/
     planning/      A* (binary heap, 8-connected), Hybrid A* and path smoothing
     control/       MPC (iLQR) and speed profile, PID path follower (with forward/reverse gears), twiddle
     sim/           simulations: particle filter (known map) and exploration
-    city/          OpenStreetMap city: lane-level road network, routing, city driving
+    city/          OpenStreetMap city: lane-level road network, routing, city driving, traffic, lidar perception and tracking
   modes/           the app modes (known map / exploration / city)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
