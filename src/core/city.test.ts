@@ -139,6 +139,8 @@ describe('driving in Mountain View', () => {
   it('follows real routes in its lane under the speed limits', () => {
     for (const seed of [1, 2]) {
       const sim = new CitySim(cityJson as unknown as CityDef, seed)
+      // this test is about control: localization is perfect here (see ekf.test.ts for the EKF)
+      sim.localization = 'truth'
       expect(sim.randomDestination()).toBe(true)
       let maxLat = 0
       let sumLat = 0

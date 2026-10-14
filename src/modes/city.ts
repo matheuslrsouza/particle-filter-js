@@ -1,9 +1,11 @@
 import GUI from 'lil-gui'
 import * as THREE from 'three'
 import type { CityDef } from '../core/city/cityDef'
-import { CITY_VEHICLE, CitySim } from '../core/city/citySim'
+import { CITY_VEHICLE, CitySim, type Localization } from '../core/city/citySim'
+import type { GpsGrade } from '../core/sensors/gps'
 import { wrapAngle } from '../core/math/angles'
 import type { Pose } from '../core/math/vec'
+import { Belief3d } from '../render/belief3d'
 import { CameraRig, type CameraMode } from '../render/cameras'
 import { Car3d } from '../render/car3d'
 import { createCity3d, destinationPin, laneGraphView, routeRibbon } from '../render/city3d'
@@ -48,11 +50,22 @@ export async function startCity(): Promise<void> {
   // the maze car is modeled with a 0.5 m wheelbase: scale it to a real car
   const car = new Car3d(0.5)
   car.group.scale.setScalar(CITY_VEHICLE.wheelbase / 0.5)
+  // where the car believes it is (EKF estimate): wireframe ghost + 2σ ellipse + GPS fixes
+  const ghost = new Car3d(0.5, true)
+  ghost.group.scale.setScalar(CITY_VEHICLE.wheelbase / 0.5)
+  const ellipse = new Belief3d()
+  const gpsGeo = new THREE.BufferGeometry()
+  const gpsPoints = new THREE.Points(
+    gpsGeo,
+    new THREE.PointsMaterial({ size: 0.6, vertexColors: true, depthTest: false, transparent: true, opacity: 0.9 }),
+  )
+  gpsPoints.renderOrder = 11
+  gpsPoints.frustumCulled = false
   const pin = destinationPin()
   const mpcView = new MpcView()
   mpcView.group.position.y = 0.15
   let route: THREE.Mesh | null = null
-  scene.add(city3d.group, lanes, car.group, pin, mpcView.group)
+  scene.add(city3d.group, lanes, car.group, ghost.group, ellipse.mesh, gpsPoints, pin, mpcView.group)
 
   const view = {
     camera: 'chase' as CameraMode,
@@ -63,6 +76,9 @@ export async function startCity(): Promise<void> {
     laneGraph: false,
     route: true,
     mpc: true,
+    localization: 'ekf' as Localization,
+    gps: 'dual' as GpsGrade,
+    belief: true,
   }
   rig.setMode('chase')
   const gui = new GUI({ title: 'Controls' })
@@ -74,6 +90,16 @@ export async function startCity(): Promise<void> {
   simF.add({ go: () => sim.randomDestination() }, 'go').name('Random destination')
   simF.add({ reset: () => sim.reset() }, 'reset').name('Reset car')
   simF.add(view, 'camera', { Chase: 'chase', Orbit: 'orbit', 'Top-down': 'top' }).name('Camera').onChange((m: CameraMode) => rig.setMode(m))
+  const loc = gui.addFolder('Localization')
+  loc
+    .add(view, 'localization', { 'EKF (GPS + odometry)': 'ekf', 'GPS only': 'gps', 'Odometry only': 'odometry', 'True pose (cheat)': 'truth' })
+    .name('Car uses')
+    .onChange((m: Localization) => (sim.localization = m))
+  loc
+    .add(view, 'gps', { 'RTK (~2 cm)': 'rtk', 'Dual-frequency (~0.5 m)': 'dual', 'Consumer (~1.5 m)': 'consumer' })
+    .name('GPS receiver')
+    .onChange((g: GpsGrade) => (sim.gpsGrade = g))
+  loc.add(view, 'belief').name('Show estimate + GPS fixes')
   const layers = gui.addFolder('Layers')
   layers.add(view, 'route').name('Route')
   layers.add(view, 'mpc').name('MPC prediction / reference')
@@ -143,6 +169,20 @@ export async function startCity(): Promise<void> {
     if (route) route.visible = view.route && sim.phase === 'driving'
     // the car model's units are the maze car's: its odometer must be scaled back for the wheels
     car.update(interp, sim.car.steer, sim.car.odometer / (CITY_VEHICLE.wheelbase / 0.5), view.paused ? 0 : dt)
+    ghost.update(sim.estimate, sim.car.steer, 0, 0)
+    ghost.group.visible = ellipse.mesh.visible = gpsPoints.visible = view.belief
+    const [sxx, sxy, syy] = sim.ekf.cov
+    ellipse.update({ ...sim.ekf.pose, cov: [sxx, sxy, syy], neff: 1 })
+    ellipse.mesh.position.y = 0.3
+    const pos = new Float32Array(sim.gpsMarks.length * 3)
+    const col = new Float32Array(sim.gpsMarks.length * 3)
+    sim.gpsMarks.forEach((m, i) => {
+      pos.set([m.x, 0.3, m.y], i * 3)
+      // accepted fixes in green, rejected (gated out) in red
+      col.set(m.rejected ? [1, 0.2, 0.3] : [0.2, 1, 0.5], i * 3)
+    })
+    gpsGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    gpsGeo.setAttribute('color', new THREE.BufferAttribute(col, 3))
     const f = sim.follower
     const mpcActive = !!f && sim.phase === 'driving'
     if (mpcActive) mpcView.set(f!.predicted(), f!.reference)
@@ -164,7 +204,7 @@ export async function startCity(): Promise<void> {
         { label: 'speed', color: '#00e5ff', values: sim.telemetry.map((d) => d.speed * KMH), range: 60 },
         { label: 'limit', color: '#ffd60a', values: sim.telemetry.map((d) => d.limit * KMH), range: 60 },
       ],
-      `km/h · lane error ${((t?.lateral ?? 0) * 100).toFixed(0)} cm · last 30 s`,
+      `km/h · lane error ${((t?.lateral ?? 0) * 100).toFixed(0)} cm · loc error ${(sim.locError * 100).toFixed(0)} cm`,
     )
     renderer.render(scene, rig.camera)
     requestAnimationFrame(frame)
