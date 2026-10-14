@@ -11,6 +11,7 @@ import { advancePose, type VehicleParams, type VehicleState } from '../vehicle/b
 import type { Segment as WallSegment } from '../world/map'
 import type { CityDef } from './cityDef'
 import { drivableGrid } from './drivable'
+import { Traffic, type EgoState, NPC_LENGTH } from './traffic'
 import { buildParking, parkedPose, rectangle, spotsBetweenCars, type ParkingLot, type ParkingSpot } from './parking'
 import { buildLaneGraph, type LaneGraph } from './roadNetwork'
 import { DEFAULT_ROUTING, locate, planRoute, pointAt, snapToLane, type LanePosition, type Route } from './routing'
@@ -63,6 +64,9 @@ export const CITY_HYBRID: HybridParams = {
   goalTolerance: 0.7,
   maxExpansions: 30_000,
 }
+
+/** front bumper, ahead of the rear axle (the reference point of poses and routes) */
+const EGO_FRONT = 4.26
 
 const LIDAR_ANGLES = Array.from({ length: 31 }, (_, i) => ((i - 15) / 15) * ((35 * Math.PI) / 180))
 const LIDAR_RANGE = 50
@@ -143,6 +147,12 @@ export class CitySim {
   /** the last maneuver, U-turn or parking (world coordinates) */
   maneuver: { result: HybridResult; path: PathPose[]; origin: Vec2 } | null = null
   readonly parking: ParkingLot[]
+  /** other cars and pedestrians (off unless enabled) */
+  traffic: Traffic | null = null
+  /** what the car is reacting to, for the HUD */
+  yielding: '' | 'following' | 'junction' | 'pedestrian' = ''
+  leaderGap = Infinity
+  private egoHeld = new Set<number>()
   /** the spot of a parking mission and where the car enters its lot */
   parkingGoal: { spot: ParkingSpot; entrance: Vec2; lotExit: Vec2 } | null = null
   onMessage: (msg: string) => void = () => {}
@@ -173,6 +183,19 @@ export class CitySim {
     this.reset()
   }
 
+  /** Adds other cars (IDM car following, junction reservations) and pedestrians at crosswalks. */
+  enableTraffic(cars = 40, pedestrians = 30): void {
+    // its own random stream, so the rest of the simulation stays reproducible
+    this.traffic = new Traffic(this.graph, new Rng(this.rng.int(1e9) + 1), cars, pedestrians)
+    this.traffic.blocked = this.blockedLanes
+  }
+
+  disableTraffic(): void {
+    this.traffic = null
+    this.egoHeld.clear()
+    this.yielding = ''
+  }
+
   /** Puts the car on Castro Street (or the longest lane), 10 m into it. */
   reset(): void {
     const lanes = this.graph.lanes.filter((l) => l.length > 30)
@@ -201,6 +224,8 @@ export class CitySim {
     this.blockedLanes.clear()
     this.maneuver = null
     this.parkingGoal = null
+    if (this.traffic) for (const c of this.egoHeld) this.traffic.release(c, -1)
+    this.egoHeld.clear()
     this.lidarRays = []
     this.barrierVersion++
     this.routeVersion++
@@ -337,6 +362,7 @@ export class CitySim {
     const path: PathPose[] = []
     const speedLimit: number[] = []
     const names: string[] = []
+    const connectors: number[] = []
     for (const target of this.targets) {
       const goal = snapToLane(this.graph, target)
       if (!goal) return false
@@ -346,10 +372,11 @@ export class CitySim {
       path.push(...leg.path.slice(skip))
       speedLimit.push(...leg.speedLimit.slice(skip))
       names.push(...leg.names.slice(skip))
+      connectors.push(...leg.connectors.slice(skip))
       start = goal
     }
     if (path.length < 3) return false
-    this.route = { steps: [], path, speedLimit, names, length: path.length * 0.5 }
+    this.route = { steps: [], path, speedLimit, names, connectors, length: path.length * 0.5 }
     this.destination = this.targets[this.targets.length - 1]
     this.follower = new MpcFollower([{ dir: 1, points: path, speedLimit }], this.mpc)
     this.routeIndex = 0
@@ -384,6 +411,7 @@ export class CitySim {
     this.localize(odo, dt)
     if (this.tickCount % 5 === 0) this.scanAhead()
     const f = this.follower
+    if (this.traffic) this.stepTraffic(dt)
     if ((this.phase === 'driving' || this.phase === 'stopping' || this.phase === 'uturn' || this.phase === 'parking') && f) {
       ;[a, w] = f.control(this.estimate, odo.speed, odo.steer, dt)
       if (this.phase === 'driving') {
@@ -439,6 +467,116 @@ export class CitySim {
       })
       if (this.telemetry.length > 300) this.telemetry.shift()
     }
+  }
+
+  /**
+   * Interaction with traffic: reports the car to the others (lane position, junction it holds),
+   * reserves the next junction, and limits its speed for the lead vehicle, a junction it may not
+   * enter yet, or a crosswalk with someone on it.
+   */
+  private stepTraffic(dt: number): void {
+    const t = this.traffic!
+    const e = this.estimate
+    const route = this.route
+    const driving = this.phase === 'driving' && route && this.follower
+    // where the car is in the graph
+    let edge: EgoState['edge'] = null
+    let s = 0
+    const conn = driving ? route!.connectors[Math.min(this.routeIndex, route!.connectors.length - 1)] : -1
+    if (conn >= 0) {
+      edge = { kind: 'connector', id: conn }
+      s = projectS(this.graph.connectors[conn].points, e)
+    } else {
+      const pos = snapToLane(this.graph, e, e.theta)
+      if (pos && Math.hypot(pos.point.x - e.x, pos.point.y - e.y) < 2) {
+        edge = { kind: 'lane', id: pos.lane }
+        s = pos.s
+      }
+    }
+    // obstacles ahead along the route: [distance to stop at, speed of the obstacle]
+    const stops: [number, number, typeof this.yielding][] = []
+    if (driving) {
+      const path = route!.path
+      const i0 = this.routeIndex
+      const until = Math.min(path.length, i0 + 160)
+      // the next junction on the route (not the one the car is crossing): hold it, or stop
+      // before it; look far enough ahead to brake comfortably
+      const horizon = Math.round((EGO_FRONT + 10 + (this.car.speed * this.car.speed) / (2 * 2)) / 0.5)
+      let upcoming = -1
+      for (let i = i0; i < Math.min(path.length, i0 + Math.max(70, horizon)); i++) {
+        const c = route!.connectors[i]
+        if (c >= 0 && c !== conn) {
+          upcoming = i
+          break
+        }
+      }
+      const want = new Set<number>()
+      if (conn >= 0) want.add(conn)
+      if (upcoming >= 0) {
+        const c = route!.connectors[upcoming]
+        if (this.egoHeld.has(c) || t.reserve(c, -1)) {
+          this.egoHeld.add(c)
+          want.add(c)
+        } else if (upcoming > i0) stops.push([(upcoming - i0) * 0.5 - EGO_FRONT - 0.5, 0, 'junction'])
+      }
+      for (const c of [...this.egoHeld]) {
+        if (!want.has(c)) {
+          t.release(c, -1)
+          this.egoHeld.delete(c)
+        }
+      }
+      // lead vehicles: any car close to the route ahead
+      for (const n of t.npcs) {
+        for (let i = i0; i < until; i += 2) {
+          if (Math.hypot(n.pose.x - path[i].x, n.pose.y - path[i].y) < 1.6) {
+            const along = Math.cos(n.pose.theta - path[i].theta)
+            // bumper to bumper: our front is 4.26 m ahead of the rear axle (the route reference)
+            stops.push([(i - i0) * 0.5 - EGO_FRONT - NPC_LENGTH / 2, Math.max(0, n.v * along), 'following'])
+            break
+          }
+        }
+      }
+      // safety net: anyone walking across the route ahead
+      for (const p of t.pedestrians) {
+        if (p.state !== 'crossing') continue
+        for (let i = i0; i < Math.min(until, i0 + 70); i += 2) {
+          if (Math.hypot(p.pos.x - path[i].x, p.pos.y - path[i].y) < 2) {
+            stops.push([(i - i0) * 0.5 - EGO_FRONT - 1.5, 0, 'pedestrian'])
+            break
+          }
+        }
+      }
+      // crosswalks with someone on them
+      const active = t.activeCrosswalks()
+      for (const cw of t.crosswalks) {
+        if (!active.has(cw.id)) continue
+        for (let i = i0; i < until - 1; i += 1) {
+          if (segmentsIntersect(cw.a, cw.b, path[i], path[i + 1])) {
+            stops.push([(i - i0) * 0.5 - EGO_FRONT - 1.5, 0, 'pedestrian'])
+            break
+          }
+        }
+      }
+    }
+    // the closest constraint shapes the speed: v(d) = √(v_lead² + 2·b·(gap − s0 − T·v_lead − d))
+    this.yielding = ''
+    this.leaderGap = Infinity
+    if (driving && stops.length) {
+      const b = 2.5
+      const limit = (d: number) => {
+        let v = Infinity
+        for (const [gap, vl, kind] of stops) {
+          const room = gap - (kind === 'following' ? 2 + 1.4 * vl : 0) - d
+          v = Math.min(v, Math.sqrt(Math.max(0, vl * vl + 2 * b * room)))
+        }
+        return v
+      }
+      this.follower!.dynamicLimit = limit
+      const nearest = stops.reduce((m, x) => (x[0] < m[0] ? x : m))
+      if (limit(0) < this.car.speed + 1.5) this.yielding = nearest[2]
+      this.leaderGap = nearest[0]
+    } else if (this.follower) this.follower.dynamicLimit = null
+    t.step(dt, { pose: e, speed: this.car.speed, edge, s, reserved: conn })
   }
 
   /** Marks mission checkpoints as reached when the car passes them. */
@@ -663,4 +801,30 @@ function projectOnPolyline(pts: Vec2[], p: Vec2): { point: Vec2; heading: number
     }
   }
   return out
+}
+
+function projectS(pts: Vec2[], p: Vec2): number {
+  let best = Infinity
+  let bestS = 0
+  let acc = 0
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]
+    const b = pts[i]
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const len2 = dx * dx + dy * dy
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0
+    const d = Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t))
+    if (d < best) {
+      best = d
+      bestS = acc + Math.sqrt(len2) * t
+    }
+    acc += Math.sqrt(len2)
+  }
+  return bestS
+}
+
+function segmentsIntersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
+  const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+  return o(a, b, c) * o(a, b, d) <= 0 && o(c, d, a) * o(c, d, b) <= 0
 }

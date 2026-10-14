@@ -369,6 +369,11 @@ export class MpcFollower {
   /** speed of the reference one step ahead (for the chart) */
   refSpeed = 0
   reference: MpcRef[] = []
+  /**
+   * optional extra speed limit as a function of the distance ahead of the car (m), e.g. to
+   * follow a lead vehicle or stop at a line; set by the caller every tick
+   */
+  dynamicLimit: ((ahead: number) => number) | null = null
   readonly solver: Ilqr
   private profiles: number[][]
   private arcs: number[][]
@@ -467,13 +472,14 @@ export class MpcFollower {
     const dir = this.gear.dir
     const total = this.arcs[this.segment][this.arcs[this.segment].length - 1]
     let s = this.progress(est)
+    const s0 = s
     // current speed along the gear direction (0 if the car still rolls the other way)
     let v = Math.max(0, speed * dir)
     const ref: MpcRef[] = []
     for (let k = 0; k <= N; k++) {
       const p = this.pointAt(s)
       ref.push({ x: p.x, y: p.y, theta: p.theta, v: dir * v })
-      const limit = this.profileAt(s)
+      const limit = Math.min(this.profileAt(s), this.dynamicLimit ? this.dynamicLimit(s - s0) : Infinity)
       v = Math.min(limit, v + accel * dt)
       s = Math.min(total, s + v * dt)
     }

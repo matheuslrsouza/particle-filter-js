@@ -22,6 +22,8 @@ export interface Route {
   path: PathPose[]
   speedLimit: number[]
   names: string[]
+  /** junction connector each point is on (-1 on a lane): where the car must yield */
+  connectors: number[]
   length: number
 }
 
@@ -196,13 +198,15 @@ function buildRoute(g: LaneGraph, steps: RouteStep[]): Route {
   const pts: Vec2[] = []
   const limits: number[] = []
   const names: string[] = []
-  const push = (list: Vec2[], limit: number, name: string) => {
+  const conns: number[] = []
+  const push = (list: Vec2[], limit: number, name: string, connector = -1) => {
     for (const p of list) {
       const last = pts[pts.length - 1]
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.05) continue
       pts.push(p)
       limits.push(limit)
       names.push(name)
+      conns.push(connector)
     }
   }
   for (let i = 0; i < steps.length; i++) {
@@ -212,7 +216,7 @@ function buildRoute(g: LaneGraph, steps: RouteStep[]): Route {
       if (st.to - st.from > 0.05) push(subPolyline(L.points, st.from, st.to), L.speed, L.name)
     } else if (st.kind === 'connector') {
       const c = g.connectors[st.connector]
-      push(c.points, Math.min(g.lanes[c.from].speed, g.lanes[c.to].speed), g.lanes[c.to].name)
+      push(c.points, Math.min(g.lanes[c.from].speed, g.lanes[c.to].speed), g.lanes[c.to].name, c.id)
     } else {
       // lane change: blend from the current lane to the neighbor (smoothstep), the lanes are parallel
       const A = g.lanes[st.from]
@@ -228,13 +232,14 @@ function buildRoute(g: LaneGraph, steps: RouteStep[]): Route {
       push(blend, Math.min(A.speed, B.speed), A.name)
     }
   }
-  return densify(pts, limits, names)
+  return densify(pts, limits, names, conns)
 }
 
-function densify(pts: Vec2[], limits: number[], names: string[]): Route {
+function densify(pts: Vec2[], limits: number[], names: string[], conns: number[]): Route {
   const path: PathPose[] = []
   const speedLimit: number[] = []
   const outNames: string[] = []
+  const connectors: number[] = []
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1]
     const b = pts[i]
@@ -245,6 +250,8 @@ function densify(pts: Vec2[], limits: number[], names: string[]): Route {
       path.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, theta: 0, dir: 1 })
       speedLimit.push(limits[i])
       outNames.push(names[i])
+      // a stretch belongs to a connector only if both its ends do
+      connectors.push(conns[i] >= 0 && conns[i] === conns[i - 1] ? conns[i] : -1)
     }
   }
   // heading from the tangent
@@ -253,7 +260,7 @@ function densify(pts: Vec2[], limits: number[], names: string[]): Route {
     const b = path[Math.min(path.length - 1, i + 1)]
     path[i].theta = Math.atan2(b.y - a.y, b.x - a.x)
   }
-  return { steps: [], path, speedLimit, names: outNames, length: polylineLength(path) }
+  return { steps: [], path, speedLimit, names: outNames, connectors, length: polylineLength(path) }
 }
 
 /** The lane position of a pose (snaps onto a lane going the same way). */
