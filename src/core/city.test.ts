@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import cityJson from '../maps/city-mountain-view.json'
 import type { CityDef, CityRoad } from './city/cityDef'
+import { CitySim } from './city/citySim'
 import { buildLaneGraph, largestComponent, type LaneGraph } from './city/roadNetwork'
+import { planRoute, snapToLane } from './city/routing'
 import type { Vec2 } from './math/vec'
 
 const road = (id: number, name: string, pts: [number, number][], nodes: number[], fwd: number, bwd: number): CityRoad => ({
@@ -102,4 +104,61 @@ describe('road network (Mountain View)', () => {
     const ok = g.connectors.filter((c) => minRadius(c.points) >= 4).length
     expect(ok / g.connectors.length).toBeGreaterThan(0.95)
   })
+})
+
+describe('routing', () => {
+  const g = buildLaneGraph(fixture)
+  const at = (x: number, y: number, heading?: number) => snapToLane(g, { x, y }, heading)!
+
+  it('turns right into the one-way street', () => {
+    const route = planRoute(g, at(20, 103, 0), at(103, 170))!
+    expect(route).not.toBeNull()
+    const end = route.path[route.path.length - 1]
+    expect(end.y).toBeGreaterThan(160)
+    expect(route.names[route.names.length - 1]).toBe('Oak St')
+  })
+
+  it('respects the one-way: the north part of Oak St cannot be reached', () => {
+    expect(planRoute(g, at(20, 103, 0), at(100, 30))).toBeNull()
+  })
+
+  it('builds a continuous trajectory with headings and speed limits', () => {
+    const route = planRoute(g, at(20, 103, 0), at(180, 103))!
+    for (let i = 1; i < route.path.length; i++) {
+      const a = route.path[i - 1]
+      const b = route.path[i]
+      expect(Math.hypot(b.x - a.x, b.y - a.y)).toBeLessThan(0.6)
+    }
+    expect(route.speedLimit.every((v) => v === 11)).toBe(true)
+    // driving east the whole way
+    expect(route.path.every((p) => Math.cos(p.theta) > 0.9)).toBe(true)
+  })
+})
+
+describe('driving in Mountain View', () => {
+  it('follows real routes in its lane under the speed limits', () => {
+    for (const seed of [1, 2]) {
+      const sim = new CitySim(cityJson as unknown as CityDef, seed)
+      expect(sim.randomDestination()).toBe(true)
+      let maxLat = 0
+      let sumLat = 0
+      let n = 0
+      let overSpeed = 0
+      for (let i = 0; i < 50 * 300 && sim.phase === 'driving'; i++) {
+        sim.tick()
+        const f = sim.follower!
+        if (i > 50) {
+          maxLat = Math.max(maxLat, Math.abs(f.cte))
+          sumLat += Math.abs(f.cte)
+          n++
+        }
+        overSpeed = Math.max(overSpeed, sim.car.speed - sim.route!.speedLimit[Math.min(f.index, sim.route!.speedLimit.length - 1)])
+      }
+      expect(sim.phase).toBe('arrived')
+      expect(sumLat / n).toBeLessThan(0.3)
+      expect(maxLat).toBeLessThan(1)
+      expect(overSpeed).toBeLessThan(0.6)
+      expect(Math.hypot(sim.car.x - sim.destination!.x, sim.car.y - sim.destination!.y)).toBeLessThan(1)
+    }
+  }, 120_000)
 })

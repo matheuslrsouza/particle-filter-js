@@ -235,7 +235,8 @@ export function buildLaneGraph(city: CityDef, params: NetworkParams = DEFAULT_NE
       const sameLayout =
         segs[0].road.lanesForward + segs[0].road.lanesBackward === segs[1].road.lanesForward + segs[1].road.lanesBackward &&
         segs[0].road.centerTurnLane === segs[1].road.centerTurnLane
-      j.radius = bend > 0.5 ? maxW + setback : sameLayout ? 1 : 8
+      // a change of lane layout needs a long taper (~40 m), like on real streets
+      j.radius = bend > 0.5 ? maxW + setback : sameLayout ? 1 : 20
     }
   }
 

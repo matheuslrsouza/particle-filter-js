@@ -38,6 +38,8 @@ export interface MpcParams {
   iterations: number
   /** time between two solves (s); the first control is held in between */
   solveEvery: number
+  /** distance (m) over which the speed profile measures curvature (0 = adjacent points) */
+  curvatureWindow?: number
 }
 
 export const DEFAULT_MPC: MpcParams = {
@@ -380,7 +382,11 @@ export class MpcFollower {
     this.solver = new Ilqr(p)
     this.arcs = gears.map((g) => arcLengths(g.points))
     this.profiles = gears.map((g) =>
-      speedProfile(g.points, { vMax: g.dir > 0 ? p.forwardSpeed : p.reverseSpeed, aLat: p.aLat, accel: p.accel, brake: p.brake }),
+      speedProfile(
+        g.points,
+        { vMax: g.dir > 0 ? p.forwardSpeed : p.reverseSpeed, aLat: p.aLat, accel: p.accel, brake: p.brake, curvatureWindow: p.curvatureWindow },
+        g.speedLimit,
+      ),
     )
   }
 

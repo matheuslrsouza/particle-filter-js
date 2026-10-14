@@ -316,3 +316,28 @@ export function createCity3d(city: CityDef, g: LaneGraph): City3d {
   group.add(groundGroup, roadGroup, buildingMesh, treeGroup)
   return { group, floor: plane, buildings: buildingMesh, trees: treeGroup, roads: roadGroup }
 }
+
+/** The route painted on the road. */
+export function routeRibbon(points: Vec2[]): THREE.Mesh {
+  const b = new FlatBuilder()
+  b.ribbon(points, -0.45, 0.45, Y.marking + 0.02)
+  const m = b.mesh(0x00c8ff, 5)
+  const mat = m.material as THREE.MeshStandardMaterial
+  mat.transparent = true
+  mat.opacity = 0.55
+  mat.emissive = new THREE.Color(0x0088aa)
+  m.receiveShadow = false
+  return m
+}
+
+/** Destination pin. */
+export function destinationPin(): THREE.Group {
+  const g = new THREE.Group()
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff3b6b, emissive: 0x80102a, roughness: 0.4 })
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6, 8).translate(0, 3, 0), mat)
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.9, 16, 12).translate(0, 6.6, 0), mat)
+  pole.castShadow = head.castShadow = true
+  g.add(pole, head)
+  g.visible = false
+  return g
+}

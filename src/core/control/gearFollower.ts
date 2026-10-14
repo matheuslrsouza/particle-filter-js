@@ -7,6 +7,8 @@ export interface Gear {
   dir: number
   /** poses of the segment (the heading is used as reference by the MPC) */
   points: PathPose[]
+  /** optional speed limit (m/s) at every point */
+  speedLimit?: number[]
 }
 
 /** Splits a Hybrid A* path wherever the car switches between forward and reverse. */
