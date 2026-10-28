@@ -77,7 +77,16 @@ The first step to run these algorithms on a real robot: a broken Xiaomi Robot Va
 - **Wiring (for now):** the lidar stays connected to the robot's own board, which powers it and spins it while cleaning. Two wires soldered on the lidar board (TX and GND pads, next to its 4-pin connector) go to a USB-serial adapter set to 3.3 V: TX → RXI, GND → GND.
 - **Protocol** (decoded from a capture; not documented anywhere we found): 115200 baud, 8N1, 3.3 V, 36-byte packets `55 AA 03 08 | speed | start angle | 8 × (distance mm, quality) | end angle | check`, little-endian. Speed = rpm × 64, angle = (raw − 0xA000) / 64 degrees, distance 0x8000 = no echo. It matches the Camsense X1 lidar format. About 310–330 rpm (~5 turns/s) and ~390 points per turn. The checksum algorithm is still unknown, so packets are validated by their structure.
 - **The mode** (`?mode=lidar`, *Real lidar* in the mode menu) shows the point cloud live, with the last turns fading out. *Connect USB-serial* uses Web Serial (Chrome or Edge on a computer); *Play sample capture* replays a 30 s capture of the real robot inside a box, so it works without hardware. *Record raw bytes* saves new captures as `.bin` files, which *Open a capture* plays back. *Mounting* rotates or mirrors the scan until angle 0 matches the robot's front.
-- **Next:** an ESP32 reads the lidar and sends it over Wi-Fi, then drives the wheels (encoders + motor drivers) in place of the original board.
+- **ESP32 over Wi-Fi** (`firmware/lidar_bridge`): an ESP32 DevKit reads the lidar (TX → GPIO16, GND → GND; the signal is 3.3 V, so no level shifter) and sends the raw bytes over a WebSocket on port 81. In the mode, *Connect ESP32 (Wi-Fi)* with the address `lidar.local` (or the IP the ESP32 prints). The browser blocks `ws://` from an https page, so use the local dev server (`npm run dev`) for this one. To build and flash with [arduino-cli](https://arduino.github.io/arduino-cli/):
+  ```
+  arduino-cli core install esp32:esp32 && arduino-cli lib install WebSockets   # once
+  cp firmware/lidar_bridge/secrets.h.example firmware/lidar_bridge/secrets.h     # then fill in your Wi-Fi
+  arduino-cli compile --fqbn esp32:esp32:esp32 firmware/lidar_bridge
+  arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware/lidar_bridge
+  arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200                         # shows its address
+  ```
+  Without hardware, `node scripts/fake-esp32.mjs` plays the sample capture over the same WebSocket (address `localhost:8081`).
+- **Next:** the ESP32 drives the wheels (encoders + motor drivers) in place of the original board.
 
 ## Running locally
 
