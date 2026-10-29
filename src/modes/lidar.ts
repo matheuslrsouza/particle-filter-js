@@ -1,6 +1,8 @@
 import GUI from 'lil-gui'
 import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
+import type { Pose, Vec2 } from '../core/math/vec'
+import { HectorSlam, scanToPoints } from '../core/slam/hector'
 import sampleUrl from '../real/sample-capture.bin?url'
 import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
 import { CameraRig } from '../render/cameras'
@@ -16,9 +18,22 @@ const MAX_POINTS = 440
 /** Xiaomi S10+ body: 35 cm across */
 const ROBOT_RADIUS = 0.175
 
+/** a turn as drawn: its usable samples, the matching points in the robot frame and where the robot was */
+interface Turn {
+  rev: Revolution
+  samples: LidarSample[]
+  points: Vec2[]
+  pose: Pose
+}
+
 /**
- * Live view of the real lidar from the Xiaomi robot vacuum: bytes from the USB-serial adapter (or
- * a recorded capture) → packet decoder → full turns → point cloud, with the last turns fading out.
+ * Live view of the real lidar from the Xiaomi robot vacuum: bytes from the ESP32 (Wi-Fi), the
+ * USB-serial adapter or a recorded capture → packet decoder → full turns → point cloud, with the
+ * last turns fading out. With mapping on, each turn is matched against the map built so far
+ * (Hector SLAM), so the robot moves on a map of the room instead of the room moving around it.
+ *
+ * Frames: the SLAM works in x forward / y along the lidar's angle; on screen x_slam → −z (up) and
+ * y_slam → +x, which keeps the plain view as it was (angle 0 up).
  */
 export function startLidar(): void {
   const container = document.getElementById('app')!
@@ -33,7 +48,31 @@ export function startLidar(): void {
   const world = new THREE.Group()
   world.position.copy(CENTER)
   scene.add(world)
-  world.add(rangeRings(), robotBody())
+  const robot = robotBody()
+  const rings = rangeRings()
+  world.add(rings, robot)
+
+  // the map: one texel per cell of the finest grid, transparent where unknown
+  let slam = new HectorSlam()
+  const mapSize = slam.maps[0].cells
+  const mapPixels = new Uint8Array(mapSize * mapSize * 4)
+  const mapTexture = new THREE.DataTexture(mapPixels, mapSize, mapSize, THREE.RGBAFormat)
+  mapTexture.magFilter = THREE.NearestFilter
+  const mapExtent = mapSize * slam.maps[0].resolution
+  const mapMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(mapExtent, mapExtent),
+    new THREE.MeshBasicMaterial({ map: mapTexture, transparent: true, depthWrite: false }),
+  )
+  mapMesh.rotation.x = -Math.PI / 2
+  mapMesh.position.y = 0.002
+  world.add(mapMesh)
+  const pathGeo = new THREE.BufferGeometry()
+  const path = new THREE.Line(pathGeo, new THREE.LineBasicMaterial({ color: 0xff2e88 }))
+  path.position.y = 0.01
+  path.frustumCulled = false
+  world.add(path)
+  let mapDirty = false
+  let lastMapUpload = 0
 
   const positions = new Float32Array(MAX_TURNS * MAX_POINTS * 3)
   const colors = new Float32Array(MAX_TURNS * MAX_POINTS * 3)
@@ -54,12 +93,15 @@ export function startLidar(): void {
     rotation: 0,
     colorBy: 'age' as 'age' | 'quality' | 'distance',
     freeze: false,
+    mapping: true,
+    deskew: true,
+    follow: true,
   }
 
   let source: ByteSource | null = null
   let parser = new CamsenseParser()
   let assembler = new RevolutionAssembler()
-  let turns: Revolution[] = []
+  let turns: Turn[] = []
   let recording: Uint8Array[] | null = null
   const rate = { turns: 0, since: performance.now(), hz: 0 }
 
@@ -70,7 +112,7 @@ export function startLidar(): void {
       if (!rev) continue
       rate.turns++
       if (view.freeze) continue
-      turns.push(rev)
+      turns.push(process(rev))
       if (turns.length > MAX_TURNS) turns.shift()
       redraw()
     }
@@ -80,8 +122,7 @@ export function startLidar(): void {
     await stop()
     parser = new CamsenseParser()
     assembler = new RevolutionAssembler()
-    turns = []
-    redraw()
+    resetMap()
     try {
       await next.start(onBytes, (error) => {
         if (source !== next) return
@@ -103,6 +144,46 @@ export function startLidar(): void {
     await s?.stop()
   }
 
+  const usable = (s: LidarSample) => !Number.isNaN(s.distance) && s.distance >= 0.12 && s.distance <= view.maxRange && s.quality >= view.minQuality
+
+  /** One turn → points in the robot frame; with mapping on, also matched and added to the map. */
+  function process(rev: Revolution): Turn {
+    const samples = rev.samples.filter(usable)
+    const opts = { mirror: view.mirror, rotation: view.rotation, minRange: 0, maxRange: Infinity, minQuality: 0 }
+    if (!view.mapping) return { rev, samples, points: scanToPoints(samples, opts), pose: { x: 0, y: 0, theta: 0 } }
+    const points = scanToPoints(samples, { ...opts, motion: view.deskew ? slam.motion : undefined })
+    const before = slam.trajectory.length
+    const pose = { ...slam.addScan(points) }
+    if (slam.trajectory.length !== before) mapDirty = true
+    return { rev, samples, points, pose }
+  }
+
+  function resetMap() {
+    slam = new HectorSlam()
+    turns = []
+    mapPixels.fill(0)
+    mapTexture.needsUpdate = true
+    pathGeo.setFromPoints([])
+    redraw()
+  }
+
+  /** Map cells → texels: free cells dark blue, walls bright, unknown transparent. */
+  function uploadMap() {
+    const g = slam.maps[0]
+    for (let ix = 0; ix < mapSize; ix++) {
+      for (let iy = 0; iy < mapSize; iy++) {
+        const l = g.logOdds[iy * mapSize + ix]
+        // texture row = ix, column = iy (see the frame note above)
+        const k = (ix * mapSize + iy) * 4
+        if (l > 0.5) mapPixels.set([225, 240, 255, Math.min(255, 120 + l * 40)], k)
+        else if (l < -0.2) mapPixels.set([40, 70, 120, Math.min(150, -l * 60)], k)
+        else mapPixels[k + 3] = 0
+      }
+    }
+    mapTexture.needsUpdate = true
+    pathGeo.setFromPoints(slam.trajectory.map((p) => new THREE.Vector3(p.y, 0, -p.x)))
+  }
+
   function pointColor(s: LidarSample, age: number, out: THREE.Color) {
     if (view.colorBy === 'quality') out.setHSL(0.66 - Math.min(s.quality / 120, 1) * 0.66, 0.9, 0.55)
     else if (view.colorBy === 'distance') out.setHSL(Math.min(s.distance / 4, 1) * 0.8, 0.9, 0.55)
@@ -117,20 +198,24 @@ export function startLidar(): void {
   function redraw() {
     let n = 0
     const shown = turns.slice(-Math.max(1, view.trail))
-    const dir = view.mirror ? -1 : 1
-    const rot = (view.rotation * Math.PI) / 180
     shown.forEach((t, idx) => {
       const age = shown.length - 1 - idx
-      for (const s of t.samples) {
-        if (Number.isNaN(s.distance) || s.quality < view.minQuality || s.distance > view.maxRange || n >= positions.length / 3) continue
-        const a = dir * (s.angle * Math.PI) / 180 + rot
-        // the view's "up" (−z on screen) is the robot's front: angle 0 points up
-        positions.set([Math.sin(a) * s.distance, 0.02, -Math.cos(a) * s.distance], n * 3)
-        pointColor(s, age, tmp)
+      const c = Math.cos(t.pose.theta)
+      const s = Math.sin(t.pose.theta)
+      t.points.forEach((q, i) => {
+        if (n >= positions.length / 3) return
+        const wx = t.pose.x + c * q.x - s * q.y
+        const wy = t.pose.y + s * q.x + c * q.y
+        positions.set([wy, 0.02, -wx], n * 3)
+        pointColor(t.samples[i], age, tmp)
         colors.set([tmp.r, tmp.g, tmp.b], n * 3)
         n++
-      }
+      })
     })
+    const p = turns[turns.length - 1]?.pose ?? { x: 0, y: 0, theta: 0 }
+    robot.position.set(p.y, 0, -p.x)
+    robot.rotation.y = -p.theta
+    rings.position.copy(robot.position)
     geo.setDrawRange(0, n)
     geo.attributes.position.needsUpdate = true
     geo.attributes.color.needsUpdate = true
@@ -225,9 +310,15 @@ export function startLidar(): void {
     .add({ camera: 'top' }, 'camera', { 'Top-down': 'top', Orbit: 'orbit' })
     .name('Camera')
     .onChange((m: 'top' | 'orbit') => rig.setMode(m, CENTER2D(), m === 'top' ? 3 : 2.5))
+  const mapF = gui.addFolder('Mapping (SLAM)')
+  mapF.add(view, 'mapping').name('Build a map').onChange(resetMap)
+  mapF.add(view, 'deskew').name('Undo motion blur of a turn')
+  mapF.add(view, 'follow').name('Camera follows the robot')
+  mapF.add({ reset: resetMap }, 'reset').name('Clear the map')
+  mapF.add({ save: () => saveMapImage() }, 'save').name('Save the map (PNG)')
   const cal = gui.addFolder('Mounting')
-  cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange(redraw)
-  cal.add(view, 'mirror').name('Mirror (turns the other way)').onChange(redraw)
+  cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange(resetMap)
+  cal.add(view, 'mirror').name('Mirror (turns the other way)').onChange(resetMap)
   cal.close()
   material.size = view.pointSize / 100
 
@@ -236,6 +327,39 @@ export function startLidar(): void {
     rig.resize(container.clientWidth, container.clientHeight)
   })
 
+  /** The map as a PNG, walls white on dark, with the robot's path. */
+  function saveMapImage() {
+    if (mapDirty || slam.trajectory.length) uploadMap()
+    const canvas = Object.assign(document.createElement('canvas'), { width: mapSize, height: mapSize })
+    const ctx = canvas.getContext('2d')!
+    ctx.fillStyle = '#0b0f16'
+    ctx.fillRect(0, 0, mapSize, mapSize)
+    const img = ctx.createImageData(mapSize, mapSize)
+    // canvas rows go down the screen (+z), texture rows go up: flip
+    for (let r = 0; r < mapSize; r++) img.data.set(mapPixels.subarray(r * mapSize * 4, (r + 1) * mapSize * 4), (mapSize - 1 - r) * mapSize * 4)
+    const layer = Object.assign(document.createElement('canvas'), { width: mapSize, height: mapSize })
+    layer.getContext('2d')!.putImageData(img, 0, 0)
+    ctx.drawImage(layer, 0, 0)
+    const g = slam.maps[0]
+    ctx.strokeStyle = '#ff2e88'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    slam.trajectory.forEach((p, i) => {
+      const cx = (p.y - g.origin) / g.resolution
+      const cy = (p.x - g.origin) / g.resolution
+      if (i) ctx.lineTo(cx, cy)
+      else ctx.moveTo(cx, cy)
+    })
+    ctx.stroke()
+    canvas.toBlob((blob) => {
+      if (!blob) return
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `map-${new Date().toISOString().replace(/[:.]/g, '-')}.png` })
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+    })
+  }
+
+  const followed = new THREE.Vector3()
   let last = performance.now()
   renderer.setAnimationLoop((now) => {
     const dt = (now - last) / 1000
@@ -245,15 +369,28 @@ export function startLidar(): void {
       rate.turns = 0
       rate.since = now
     }
-    const t = turns[turns.length - 1]
+    const t = turns[turns.length - 1]?.rev
     if (!source) hud.setStatus('No source · connect the adapter or play the sample capture')
     else if (!t) hud.setStatus(`${source.label} · waiting for data… (${parser.skipped} bytes skipped)`)
     else {
       const valid = t.samples.filter((s) => !Number.isNaN(s.distance)).length
       hud.setStatus(
-        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${recording ? ' · ● REC' : ''}`,
+        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${recording ? ' · ● REC' : ''}`,
       )
     }
+    if (mapDirty && now - lastMapUpload > 400) {
+      uploadMap()
+      mapDirty = false
+      lastMapUpload = now
+    }
+    // follow: shift the camera by however much the robot moved, keeping the user's zoom and pan
+    const at = robot.position
+    if (view.follow) {
+      const d = at.clone().sub(followed)
+      rig.camera.position.add(d)
+      rig.controls.target.add(d)
+    }
+    followed.copy(at)
     rig.update({ x: CENTER.x, y: CENTER.z, theta: 0 }, dt)
     renderer.render(scene, rig.camera)
   })
