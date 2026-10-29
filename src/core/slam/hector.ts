@@ -22,6 +22,16 @@ export interface SlamParams {
   updateDistance: number
   updateAngle: number
   iterations: number
+  /**
+   * Correlative search before the Gauss-Newton refinement: rotations within ±searchAngle (rad) and
+   * shifts within ±searchShift (m) around the guess, scored on a coarse map. Gauss-Newton alone
+   * only converges from ~10° away, and these robots spin in place at up to ~180°/s (35° per turn).
+   */
+  searchAngle: number
+  searchAngleStep: number
+  searchShift: number
+  /** scans that fit worse than this after matching are not added to the map */
+  minFitToInsert: number
 }
 
 export const DEFAULT_SLAM: SlamParams = {
@@ -34,6 +44,10 @@ export const DEFAULT_SLAM: SlamParams = {
   updateDistance: 0.04,
   updateAngle: 0.06,
   iterations: 12,
+  searchAngle: 0.7,
+  searchAngleStep: 0.026,
+  searchShift: 0.1,
+  minFitToInsert: 0.5,
 }
 
 export class OccupancyGrid {
@@ -157,17 +171,59 @@ export class HectorSlam {
       y: 2 * this.pose.y - this.prev.y,
       theta: wrapAngle(this.pose.theta + wrapAngle(this.pose.theta - this.prev.theta)),
     }
+    if (this.p.searchAngle > 0) guess = this.search(points, guess)
     for (let level = this.maps.length - 1; level >= 0; level--) guess = this.match(this.maps[level], points, guess)
     this.prev = this.pose
     this.pose = guess
     this.lastFit = this.fit(points)
     const li = this.lastInsert
-    if (Math.hypot(guess.x - li.x, guess.y - li.y) > this.p.updateDistance || Math.abs(wrapAngle(guess.theta - li.theta)) > this.p.updateAngle) {
+    if (this.lastFit >= this.p.minFitToInsert && (Math.hypot(guess.x - li.x, guess.y - li.y) > this.p.updateDistance || Math.abs(wrapAngle(guess.theta - li.theta)) > this.p.updateAngle)) {
       for (const m of this.maps) m.insert(guess, points, this.p)
       this.lastInsert = { ...guess }
       this.trajectory.push({ ...guess })
     }
     return this.pose
+  }
+
+  /**
+   * Brute-force search around the guess on the middle map: the rotation and shift that put the
+   * most scan points (a subsample) on occupied cells.
+   */
+  private search(points: Vec2[], guess: Pose): Pose {
+    const map = this.maps[Math.min(1, this.maps.length - 1)]
+    const pts = points.filter((_, i) => i % 3 === 0)
+    const { searchAngle: A, searchAngleStep: dA, searchShift: S } = this.p
+    const dS = map.resolution
+    const score = (x: number, y: number, c: number, s: number) => {
+      let sum = 0
+      for (const q of pts) {
+        const ix = Math.floor((x + c * q.x - s * q.y - map.origin) / map.resolution)
+        const iy = Math.floor((y + s * q.x + c * q.y - map.origin) / map.resolution)
+        if (ix >= 0 && iy >= 0 && ix < map.cells && iy < map.cells) {
+          const l = map.logOdds[iy * map.cells + ix]
+          if (l > 0) sum += l
+        }
+      }
+      return sum
+    }
+    let best = { ...guess }
+    // ties keep the guess: a small bonus for staying close to it
+    let bestScore = score(guess.x, guess.y, Math.cos(guess.theta), Math.sin(guess.theta)) * 1.02
+    for (let da = -A; da <= A + 1e-9; da += dA) {
+      const th = guess.theta + da
+      const c = Math.cos(th)
+      const s = Math.sin(th)
+      for (let dx = -S; dx <= S + 1e-9; dx += dS) {
+        for (let dy = -S; dy <= S + 1e-9; dy += dS) {
+          const v = score(guess.x + dx, guess.y + dy, c, s)
+          if (v > bestScore) {
+            bestScore = v
+            best = { x: guess.x + dx, y: guess.y + dy, theta: wrapAngle(th) }
+          }
+        }
+      }
+    }
+    return best
   }
 
   /** Gauss-Newton: the pose that puts the scan points on the most occupied cells. */
