@@ -97,3 +97,43 @@ export class ReplaySource implements ByteSource {
     clearInterval(this.timer)
   }
 }
+
+/** The ESP32 bridge (firmware/lidar_bridge): raw lidar bytes over a WebSocket. */
+export class WebSocketSource implements ByteSource {
+  readonly label: string
+  private ws: WebSocket | null = null
+  private stopping = false
+
+  constructor(private url: string) {
+    this.label = `ESP32 ${url.replace(/^ws:\/\//, '')}`
+  }
+
+  start(onData: (bytes: Uint8Array) => void, onEnd: (error?: string) => void): Promise<void> {
+    // an https page (GitHub Pages) may not open ws:// connections to the local network
+    if (location.protocol === 'https:') return Promise.reject(new Error('the ESP32 needs the app opened over http (npm run dev)'))
+    this.stopping = false
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.url)
+      ws.binaryType = 'arraybuffer'
+      let open = false
+      ws.onopen = () => {
+        open = true
+        resolve()
+      }
+      ws.onmessage = (e) => onData(new Uint8Array(e.data as ArrayBuffer))
+      ws.onerror = () => {
+        if (!open) reject(new Error(`no answer from ${this.url}`))
+      }
+      ws.onclose = () => {
+        if (open) onEnd(this.stopping ? undefined : 'connection lost')
+      }
+      this.ws = ws
+    })
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true
+    this.ws?.close()
+    this.ws = null
+  }
+}

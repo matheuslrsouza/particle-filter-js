@@ -2,7 +2,7 @@ import GUI from 'lil-gui'
 import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
 import sampleUrl from '../real/sample-capture.bin?url'
-import { hasWebSerial, ReplaySource, SerialSource, type ByteSource } from '../real/sources'
+import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
 import { CameraRig } from '../render/cameras'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
@@ -27,7 +27,7 @@ export function startLidar(): void {
   scene.fog = null
   const rig = new CameraRig(renderer.domElement, AREA, { near: 0.02, far: 100, minDistance: 0.5, maxDistance: 25 })
   rig.setMode('top', CENTER2D(), 3)
-  const hud = new Hud('Connect the USB-serial adapter (TX of the lidar → RXI, GND → GND) or play the sample capture · <b>right-drag</b> to pan · <b>scroll</b> to zoom')
+  const hud = new Hud('Connect the ESP32 or the USB-serial adapter or play the sample capture · <b>right-drag</b> to pan · <b>scroll</b> to zoom')
   document.getElementById('charts')!.hidden = true
 
   const world = new THREE.Group()
@@ -148,6 +148,28 @@ export function startLidar(): void {
       'connect',
     )
     .name('Connect USB-serial (115200)')
+  // the ESP32 bridge over Wi-Fi; the address is remembered in this browser
+  const esp = { host: 'lidar.local' }
+  try {
+    esp.host = localStorage.getItem('lidar.espHost') ?? esp.host
+  } catch {
+    /* storage blocked: keep the default */
+  }
+  src
+    .add(esp, 'host')
+    .name('ESP32 address')
+    .onFinishChange((h: string) => {
+      try {
+        localStorage.setItem('lidar.espHost', h)
+      } catch {
+        /* storage blocked */
+      }
+    })
+  src.add({ esp: () => {
+    // "lidar.local" → port 81 (the firmware); "host:port" for anything else (scripts/fake-esp32.mjs)
+    const h = esp.host.trim()
+    return use(new WebSocketSource(`ws://${h.includes(':') ? h : `${h}:81`}`))
+  } }, 'esp').name('Connect ESP32 (Wi-Fi)')
   src
     .add(
       {
