@@ -346,7 +346,8 @@ export function startLidar(): void {
     ctx.beginPath()
     slam.trajectory.forEach((p, i) => {
       const cx = (p.y - g.origin) / g.resolution
-      const cy = (p.x - g.origin) / g.resolution
+      // same flip as the map rows above
+      const cy = mapSize - 1 - (p.x - g.origin) / g.resolution
       if (i) ctx.lineTo(cx, cy)
       else ctx.moveTo(cx, cy)
     })
