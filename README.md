@@ -86,6 +86,7 @@ The first step to run these algorithms on a real robot: a broken Xiaomi Robot Va
   arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200                         # shows its address
   ```
   Without hardware, `node scripts/fake-esp32.mjs` plays the sample capture over the same WebSocket (address `localhost:8081`).
+- **Mapping (SLAM)** (*Mapping* folder, on by default): while the robot cleans on its own, each lidar turn is matched against the map built so far and then added to it, so the robot moves on a map of the room instead of the room spinning around it. It's Hector SLAM (Kohlbrecher et al., 2011): no wheel odometry, Gauss-Newton matching on a bilinearly interpolated log-odds grid, coarse to fine over 3 resolutions (3, 6 and 12 cm), the map updated after moving 4 cm or 3.5°. Each turn takes 0.2 s and the robot can turn 20° or more meanwhile, so the points are first corrected for that motion (*Undo motion blur of a turn*). These robots also spin in place at up to ~180°/s (35° between turns), more than Gauss-Newton converges from, so each match starts with a brute-force search of ±40° and ±10 cm on the 6 cm map; scans that still fit poorly are not added to the map. Without that search, a 2-minute recording of a bedroom and corridor came out as several rotated copies of the room; with it, the map matches the one the robot's own app draws. `npx vite-node scripts/slam-offline.ts capture.bin out` replays a recording through the SLAM and writes the map (PGM) and a per-turn log. On the sample capture, 97% of each turn's points land on mapped walls, at ~1 ms per turn. *Save the map (PNG)* exports the map with the robot's path.
 - **Next:** the ESP32 drives the wheels (encoders + motor drivers) in place of the original board.
 
 ## Running locally
@@ -112,6 +113,7 @@ src/
     sim/           simulations: particle filter (known map) and exploration
     city/          OpenStreetMap city: lane-level road network, routing, city driving, traffic, lidar perception and tracking
     lidar/         decoder for the real robot vacuum's lidar
+    slam/          Hector SLAM: scan matching and occupancy mapping without odometry
   modes/           the app modes (known map / exploration / city / real lidar)
   real/            data sources for real hardware (Web Serial, recorded captures)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras

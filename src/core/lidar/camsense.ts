@@ -87,16 +87,21 @@ export interface Revolution {
   samples: LidarSample[]
 }
 
-/** Groups packets into full turns of the head: a turn ends when the angle wraps past 0°. */
+/**
+ * Groups packets into full turns of the head: a turn ends when the angle wraps past 0°. The turn in
+ * progress when the stream starts is dropped, since its beginning was never seen.
+ */
 export class RevolutionAssembler {
   private current: LidarSample[] = []
   private lastAngle = -1
   private rpm = 0
+  private started = false
 
   add(p: LidarPacket): Revolution | null {
     let done: Revolution | null = null
     if (this.lastAngle >= 0 && p.startAngle < this.lastAngle - 180) {
-      done = { rpm: this.rpm, samples: this.current }
+      if (this.started) done = { rpm: this.rpm, samples: this.current }
+      this.started = true
       this.current = []
     }
     for (const s of p.samples) this.current.push(s)
