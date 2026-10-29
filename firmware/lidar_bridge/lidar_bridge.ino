@@ -39,12 +39,24 @@ void connectWifi() {
   WiFi.setHostname(HOSTNAME);
   // no power saving: it adds up to ~100 ms of latency to every message
   WiFi.setSleep(false);
+  // the networks in range (the ESP32 only sees 2.4 GHz ones): helps when the connection fails
+  int n = WiFi.scanNetworks();
+  Serial.printf("%d networks in range:\n", n);
+  for (int i = 0; i < n; i++) Serial.printf("  \"%s\"  ch %d  %d dBm\n", WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("Connecting to %s", WIFI_SSID);
+  Serial.printf("Connecting to \"%s\"", WIFI_SSID);
+  uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(300);
     Serial.print('.');
     digitalWrite(LED, !digitalRead(LED));
+    if (millis() - start > 15000) {
+      // 1 = network not found, 4 = connection failed (usually the password), 6 = disconnected
+      Serial.printf("\nstill not connected (status %d), retrying\n", WiFi.status());
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      start = millis();
+    }
   }
   Serial.printf("\nConnected: ws://%s:81  (or ws://%s.local:81)\n", WiFi.localIP().toString().c_str(), HOSTNAME);
 }
