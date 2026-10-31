@@ -1,6 +1,8 @@
 /** HTTP client of scripts/robot-bridge.mjs, which drives the robot vacuum through its own firmware. */
 export class RobotBridge {
   private inFlight = false
+  /** when the last moving command was sent (ms, performance.now) */
+  lastMoveAt = 0
 
   constructor(public url: string) {}
 
@@ -8,6 +10,7 @@ export class RobotBridge {
   async drive(v: number, w: number): Promise<void> {
     if (this.inFlight) return
     this.inFlight = true
+    if (Math.round(v) || Math.round(w)) this.lastMoveAt = performance.now()
     try {
       await fetch(`${this.url}/drive?v=${Math.round(v)}&w=${Math.round(w)}`)
     } catch {
@@ -18,6 +21,7 @@ export class RobotBridge {
   }
 
   async stop(): Promise<void> {
+    this.lastMoveAt = 0
     try {
       await fetch(`${this.url}/stop`)
     } catch {

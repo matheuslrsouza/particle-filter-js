@@ -5,7 +5,9 @@
 //   GET /stop                    stop now
 //   GET /status                  battery, status and charging state
 // While a drive command is fresh, it is repeated every 200 ms (the robot expects a stream of steps);
-// if the browser goes quiet for 600 ms the robot is stopped (watchdog).
+// if the browser goes quiet for 600 ms the robot is stopped (watchdog). Zero-speed steps are sent
+// too: the firmware only spins the lidar while it gets remote-control steps (it starts ~1.5 s after
+// the first one and stops ~3 s after the last), so /drive?v=0&w=0 keeps the lidar on, standing still.
 //
 // Config in ~/.robo-xiaomi (not in the repo): IP=…, TOKEN=… (from Xiaomi-cloud-tokens-extractor).
 //   node scripts/robot-bridge.mjs     → http://localhost:8090
@@ -97,7 +99,7 @@ let moving = false
 setInterval(async () => {
   const fresh = Date.now() - cmd.at < 600
   try {
-    if (fresh && (cmd.v || cmd.w)) {
+    if (fresh) {
       await step(cmd.v, cmd.w)
       moving = true
     } else if (moving) {

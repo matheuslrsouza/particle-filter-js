@@ -167,7 +167,7 @@ export function startLidar(): void {
     turns = []
     mapPixels.fill(0)
     mapTexture.needsUpdate = true
-    pathGeo.setFromPoints([])
+    setLine(pathGeo, [])
     redraw()
   }
 
@@ -188,7 +188,7 @@ export function startLidar(): void {
       }
     }
     mapTexture.needsUpdate = true
-    pathGeo.setFromPoints(slam.trajectory.map((p) => new THREE.Vector3(p.y, 0, -p.x)))
+    setLine(pathGeo, slam.trajectory.map((p) => new THREE.Vector3(p.y, 0, -p.x)))
   }
 
   function pointColor(s: LidarSample, age: number, out: THREE.Color) {
@@ -330,7 +330,7 @@ export function startLidar(): void {
   material.size = view.pointSize / 100
 
   // ---- driving the real robot (scripts/robot-bridge.mjs talks to its own firmware) ----
-  const drive = { armed: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 60, manual: { v: 0, w: 0 } }
+  const drive = { armed: false, lidarOn: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 60, manual: { v: 0, w: 0 } }
   const bridge = new RobotBridge(drive.bridge)
   let goal: Vec2 | null = null
   let plan: Vec2[] | null = null
@@ -350,7 +350,7 @@ export function startLidar(): void {
     goal = null
     plan = null
     goalMarker.visible = false
-    planGeo.setFromPoints([])
+    setLine(planGeo, [])
     void bridge.stop()
     if (message) hud.message(message)
   }
@@ -359,7 +359,7 @@ export function startLidar(): void {
     if (!goal) return false
     plan = planOnMap(slam.maps[0], slam.pose, goal)
     planFrom = 0
-    planGeo.setFromPoints(plan ? plan.map(toScreen) : [])
+    setLine(planGeo, plan ? plan.map(toScreen) : [])
     return plan !== null
   }
 
@@ -422,15 +422,17 @@ export function startLidar(): void {
     manualTick()
   })
   setInterval(() => {
-    if (!drive.armed) return
     const { v, w } = drive.manual
-    if (v || w) {
+    if (drive.armed && (v || w)) {
       if (goal) clearGoal()
       void bridge.drive(v * 80, w * 50)
-    } else if (goal && performance.now() - lastNavTurn > 700) {
-      // no lidar turns: the map isn't updating, so stop
-      void bridge.stop()
+      return
     }
+    // the firmware only spins the lidar while it gets remote-control steps: zero-speed steps keep
+    // it on (standing still) whenever the follower isn't sending a moving command, and also stop
+    // the robot when lidar turns stop arriving (no map updates, no driving)
+    const following = goal && performance.now() - lastNavTurn < 700
+    if ((drive.armed || drive.lidarOn) && !(following && performance.now() - bridge.lastMoveAt < 400)) void bridge.drive(0, 0)
   }, 150)
 
   clearGoalIfAny = () => {
@@ -448,6 +450,7 @@ export function startLidar(): void {
         () => hud.message('No answer from the bridge: run node scripts/robot-bridge.mjs'),
       )
     })
+  driveF.add(drive, 'lidarOn').name('Keep the lidar on (robot still)')
   driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
   driveF.add(drive, 'vScale', 200, 1500, 10).name('Speed units per m/s')
   driveF.add(drive, 'wScale', 10, 150, 1).name('Turn units per rad/s')
@@ -528,6 +531,14 @@ export function startLidar(): void {
 }
 
 const CENTER2D = () => ({ x: CENTER.x, y: CENTER.z })
+
+/** Replaces a line's points (BufferGeometry.setFromPoints never grows an existing attribute). */
+function setLine(geo: THREE.BufferGeometry, points: THREE.Vector3[]) {
+  const a = new Float32Array(points.length * 3)
+  points.forEach((p, i) => a.set([p.x, p.y, p.z], i * 3))
+  geo.setAttribute('position', new THREE.BufferAttribute(a, 3))
+  geo.computeBoundingSphere()
+}
 
 /** Rings every 0.5 m (brighter every meter) and the axes. */
 function rangeRings(): THREE.Group {
