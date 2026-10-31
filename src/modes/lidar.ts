@@ -91,7 +91,9 @@ export function startLidar(): void {
     pointSize: 4,
     minQuality: 1,
     maxRange: 8,
-    mirror: false,
+    // the lidar's angles grow clockwise: mirrored, the map is right-handed (counter-clockwise turns
+    // are positive), as the robot's remote control and the navigation expect
+    mirror: true,
     rotation: 0,
     colorBy: 'age' as 'age' | 'quality' | 'distance',
     freeze: false,
@@ -330,7 +332,7 @@ export function startLidar(): void {
   material.size = view.pointSize / 100
 
   // ---- driving the real robot (scripts/robot-bridge.mjs talks to its own firmware) ----
-  const drive = { armed: false, lidarOn: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 60, manual: { v: 0, w: 0 } }
+  const drive = { armed: false, lidarOn: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 80, manual: { v: 0, w: 0 } }
   const bridge = new RobotBridge(drive.bridge)
   let goal: Vec2 | null = null
   let plan: Vec2[] | null = null
@@ -444,7 +446,13 @@ export function startLidar(): void {
     .add(drive, 'armed')
     .name('Armed (robot moves)')
     .onChange((on: boolean) => {
-      if (!on) return void bridge.stop()
+      if (!on) {
+        void bridge.stop()
+        void bridge.quiet(false)
+        return
+      }
+      // the firmware runs the suction during remote control: lowest power while armed
+      void bridge.quiet(true)
       bridge.status().then(
         (s) => hud.message(`Robot connected · battery ${s.battery}%`),
         () => hud.message('No answer from the bridge: run node scripts/robot-bridge.mjs'),

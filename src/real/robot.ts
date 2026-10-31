@@ -29,6 +29,15 @@ export class RobotBridge {
     }
   }
 
+  /** Quiet suction while driving (true), or back to the level it had before (false). */
+  async quiet(on: boolean): Promise<void> {
+    try {
+      await fetch(`${this.url}/suction?quiet=${on ? 1 : 0}`)
+    } catch {
+      /* no bridge */
+    }
+  }
+
   async status(): Promise<{ battery: number; status: number; charging: number }> {
     const r = await fetch(`${this.url}/status`)
     const j = await r.json()

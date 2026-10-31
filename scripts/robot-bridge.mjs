@@ -3,6 +3,7 @@
 // over HTTP:
 //   GET /drive?v=<int>&w=<int>   remote-control step: v forward (60 ≈ 8 cm/s), w turn (+ = counter-clockwise)
 //   GET /stop                    stop now
+//   GET /suction?quiet=1|0       lowest suction while driving / restore the previous level
 //   GET /status                  battery, status and charging state
 // While a drive command is fresh, it is repeated every 200 ms (the robot expects a stream of steps);
 // if the browser goes quiet for 600 ms the robot is stopped (watchdog). Zero-speed steps are sent
@@ -96,6 +97,7 @@ const step = (v, w) =>
 const clamp = (x, a) => Math.max(-a, Math.min(a, Math.round(Number(x) || 0)))
 let cmd = { v: 0, w: 0, at: 0 }
 let moving = false
+let savedSuction = null
 setInterval(async () => {
   const fresh = Date.now() - cmd.at < 600
   try {
@@ -125,6 +127,18 @@ createServer(async (req, res) => {
       await step(0, 0)
       moving = false
       res.end(JSON.stringify({ ok: true }))
+    } else if (url.pathname === '/suction') {
+      // the firmware runs the suction during remote control; quiet=1 sets the lowest power
+      // (cleaning-mode 0, siid 4 piid 4) and remembers the user's level, quiet=0 restores it
+      const quiet = url.searchParams.get('quiet') === '1'
+      if (quiet && savedSuction === null) {
+        const r = await call('get_properties', [{ did: 'suction', siid: 4, piid: 4 }])
+        savedSuction = r.result[0].value
+      }
+      const level = quiet ? 0 : savedSuction
+      if (level !== null) await call('set_properties', [{ did: 'suction', siid: 4, piid: 4, value: level }])
+      if (!quiet) savedSuction = null
+      res.end(JSON.stringify({ ok: true, level }))
     } else if (url.pathname === '/status') {
       const r = await call('get_properties', [
         { did: 'battery', siid: 3, piid: 1 },
