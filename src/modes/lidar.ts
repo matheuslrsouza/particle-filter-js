@@ -49,6 +49,13 @@ export function startLidar(): void {
   const rig = new CameraRig(renderer.domElement, AREA, { near: 0.02, far: 100, minDistance: 0.5, maxDistance: 25 })
   rig.setMode('top', CENTER2D(), 3)
   const hud = new Hud('Connect the ESP32 or the USB-serial adapter or play the sample capture · <b>right-drag</b> to pan · <b>scroll</b> to zoom')
+  const { log, logOnce } = createLogDrawer()
+  // every toast goes to the log too
+  const toast = hud.message.bind(hud)
+  hud.message = (m: string) => {
+    toast(m)
+    log(m)
+  }
   document.getElementById('charts')!.hidden = true
 
   const world = new THREE.Group()
@@ -365,7 +372,12 @@ export function startLidar(): void {
   let goal: Vec2 | null = null
   let plan: Vec2[] | null = null
   const follower = new PathFollower([], DEFAULT_NAV)
+  let lastPlanMsg = ''
   let navState = ''
+  const setNav = (s: string) => {
+    navState = s
+    logOnce(s)
+  }
   let stuckSince: { at: number; x: number; y: number } | null = null
   let backUpUntil = 0
   let lastNavTurn = 0
@@ -394,6 +406,10 @@ export function startLidar(): void {
     if (!goal) return false
     const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV)
     plan = route?.path ?? null
+    const len = plan ? plan.reduce((a, q, i) => (i ? a + Math.hypot(q.x - plan![i - 1].x, q.y - plan![i - 1].y) : 0), 0) : 0
+    const msg = plan ? `path: ${len.toFixed(2)} m` : 'no path'
+    if (msg !== lastPlanMsg || !plan) log(msg)
+    lastPlanMsg = msg
     // keeps its latency state (last command) across replans
     if (route) follower.setPath(route.path, route.bodyClear)
     setLine(planGeo, plan ? plan.map(toScreen) : [])
@@ -406,7 +422,7 @@ export function startLidar(): void {
     if (!goal || !plan) return
     if (slam.lastFit < 0.5) {
       // lost: better stop than drive blind
-      navState = 'stopped: lost on the map'
+      setNav('stopped: lost on the map')
       void bridge.stop()
       return
     }
@@ -420,8 +436,10 @@ export function startLidar(): void {
     // in the body's frame: up to 12 cm beyond its front edge, as wide as the body
     const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
     if (cmd.v > 0 && latest?.points.some(ahead)) {
-      void bridge.drive(0, 0)
-      navState = 'blocked ahead: going around'
+      // no forward motion, but keep turning toward the path: turning is what clears the front
+      const w = Math.sign(cmd.w || 1) * Math.max(0.3, Math.abs(cmd.w))
+      if (drive.armed) void bridge.drive(0, w * drive.wScale)
+      setNav('blocked ahead: turning toward the path')
       // standing still, the map isn't updated: add the obstacle now, then replan around it
       if (slam.scans % 2 === 0) {
         slam.insertNow(latest.points)
@@ -436,7 +454,7 @@ export function startLidar(): void {
     const now = performance.now()
     const c = center(slam.pose)
     if (now < backUpUntil) {
-      navState = 'stuck: backing up'
+      setNav('stuck: backing up')
       if (drive.armed) void bridge.drive(-0.08 * drive.vScale, 0)
       return
     }
@@ -446,6 +464,7 @@ export function startLidar(): void {
       else if (now - stuckSince.at > 2000) {
         stuckSince = null
         backUpUntil = now + 1300
+        log(`stuck at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}): backing up`)
         slam.insertNow(latest!.points)
         mapDirty = true
         setTimeout(() => goal && !replan() && clearGoal('Stuck: no way out found'), 1400)
@@ -453,6 +472,8 @@ export function startLidar(): void {
       }
     } else stuckSince = null
     navState = cmd.v > 0.01 ? `driving ${(cmd.v * 100).toFixed(0)} cm/s` : `turning ${((cmd.w * 180) / Math.PI).toFixed(0)}°/s`
+    // the log gets the kind of motion, not every speed change
+    logOnce(cmd.v > 0.01 ? 'driving' : cmd.w > 0 ? 'turning left in place' : 'turning right in place')
     if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
   }
 
@@ -472,6 +493,7 @@ export function startLidar(): void {
     goal = { x: -local.z, y: local.x }
     goalMarker.position.set(local.x, 0.012, local.z)
     goalMarker.visible = true
+    log(`goal (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)})`)
     if (!view.mapping || !slam.trajectory.length) return clearGoal('Build a map first (the robot must see the room)')
     if (!replan()) return clearGoal('No path there (a wall, or too close to one)')
     hud.message(drive.armed ? 'Going there' : 'Path planned: arm driving to go')
@@ -696,4 +718,53 @@ function robotBody(): THREE.Group {
   front.position.set(0, 0.1, LIDAR_AHEAD - ROBOT_RADIUS + 0.03)
   g.add(body, tower, front)
   return g
+}
+
+/**
+ * A drawer on the left with what the navigation did, time-stamped: goals, paths, motion kinds,
+ * blocks, recoveries, toasts. "Copy" puts it on the clipboard (to paste in a bug report).
+ */
+function createLogDrawer() {
+  const lines: string[] = []
+  const box = document.createElement('div')
+  box.id = 'navlog'
+  box.innerHTML = '<div class="bar"><button type="button" class="toggle">Log ▸</button><button type="button" class="copy">Copy</button><button type="button" class="clear">Clear</button></div><pre></pre>'
+  document.getElementById('hud')!.appendChild(box)
+  const pre = box.querySelector('pre')!
+  const toggle = box.querySelector<HTMLButtonElement>('.toggle')!
+  const open = () => box.classList.contains('open')
+  toggle.onclick = () => {
+    box.classList.toggle('open')
+    toggle.textContent = open() ? 'Log ◂' : 'Log ▸'
+    pre.scrollTop = pre.scrollHeight
+  }
+  box.querySelector<HTMLButtonElement>('.copy')!.onclick = () => {
+    navigator.clipboard.writeText(lines.join('\n')).catch(() => {
+      // no clipboard: select the text so it can be copied by hand
+      const r = document.createRange()
+      r.selectNodeContents(pre)
+      getSelection()?.removeAllRanges()
+      getSelection()?.addRange(r)
+    })
+  }
+  box.querySelector<HTMLButtonElement>('.clear')!.onclick = () => {
+    lines.length = 0
+    pre.textContent = ''
+  }
+  let last = ''
+  const log = (msg: string) => {
+    const t = new Date()
+    const stamp = `${t.toLocaleTimeString('en-GB')}.${String(Math.floor(t.getMilliseconds() / 100))}`
+    lines.push(`${stamp}  ${msg}`)
+    if (lines.length > 500) lines.shift()
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4
+    pre.textContent = lines.join('\n')
+    if (atBottom) pre.scrollTop = pre.scrollHeight
+    last = msg
+  }
+  /** logs only when the message differs from the last one (states, not every step) */
+  const logOnce = (msg: string) => {
+    if (msg !== last) log(msg)
+  }
+  return { log, logOnce }
 }

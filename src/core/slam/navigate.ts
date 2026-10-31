@@ -36,7 +36,7 @@ export interface NavParams {
 }
 
 export const DEFAULT_NAV: NavParams = {
-  inflate: 0.24,
+  inflate: 0.27,
   robotRadius: 0.175,
   unknownCost: 3,
   comfort: 0.15,
