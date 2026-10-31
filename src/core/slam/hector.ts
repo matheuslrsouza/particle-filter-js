@@ -271,6 +271,14 @@ export class HectorSlam {
     return { x, y, theta }
   }
 
+  /**
+   * Adds the scan to the map at the current pose even without having moved: for a robot stopped
+   * in front of something new (an obstacle), which otherwise never enters the map.
+   */
+  insertNow(points: Vec2[]): void {
+    for (const m of this.maps) m.insert(this.pose, points, this.p)
+  }
+
   private fit(points: Vec2[]): number {
     const m = this.maps[0]
     const c = Math.cos(this.pose.theta)

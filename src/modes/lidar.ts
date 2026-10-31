@@ -365,6 +365,7 @@ export function startLidar(): void {
   let goal: Vec2 | null = null
   let plan: Vec2[] | null = null
   const follower = new PathFollower([], DEFAULT_NAV)
+  let navState = ''
   let lastNavTurn = 0
   const planGeo = new THREE.BufferGeometry()
   const planLine = new THREE.Line(planGeo, new THREE.LineBasicMaterial({ color: 0x4cc9f0 }))
@@ -389,7 +390,7 @@ export function startLidar(): void {
 
   function replan(): boolean {
     if (!goal) return false
-    const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV, slam.trajectory.map(center))
+    const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV)
     plan = route?.path ?? null
     // keeps its latency state (last command) across replans
     if (route) follower.setPath(route.path, route.bodyClear)
@@ -403,6 +404,7 @@ export function startLidar(): void {
     if (!goal || !plan) return
     if (slam.lastFit < 0.5) {
       // lost: better stop than drive blind
+      navState = 'stopped: lost on the map'
       void bridge.stop()
       return
     }
@@ -417,9 +419,16 @@ export function startLidar(): void {
     const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
     if (cmd.v > 0 && latest?.points.some(ahead)) {
       void bridge.drive(0, 0)
-      if (slam.scans % 3 === 0 && !replan()) clearGoal('Blocked: no way around')
+      navState = 'blocked ahead: going around'
+      // standing still, the map isn't updated: add the obstacle now, then replan around it
+      if (slam.scans % 2 === 0) {
+        slam.insertNow(latest.points)
+        mapDirty = true
+        if (!replan()) clearGoal('Blocked: no way around')
+      }
       return
     }
+    navState = cmd.v > 0.01 ? `driving ${(cmd.v * 100).toFixed(0)} cm/s` : `turning ${((cmd.w * 180) / Math.PI).toFixed(0)}°/s`
     if (cmd.done) return clearGoal('Arrived')
     if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
   }
@@ -598,7 +607,7 @@ export function startLidar(): void {
     else {
       const valid = t.samples.filter((s) => !Number.isNaN(s.distance)).length
       hud.setStatus(
-        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${goal ? ` · goal ${Math.hypot(goal.x - slam.pose.x, goal.y - slam.pose.y).toFixed(2)} m${drive.armed ? '' : ' (not armed)'}` : ''}${recording ? ' · ● REC' : ''}`,
+        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${goal ? ` · goal ${Math.hypot(goal.x - slam.pose.x, goal.y - slam.pose.y).toFixed(2)} m${drive.armed ? ` · ${navState}` : ' (not armed)'}` : ''}${recording ? ' · ● REC' : ''}`,
       )
     }
     if (mapDirty && now - lastMapUpload > 400) {

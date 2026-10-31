@@ -214,7 +214,9 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
       const y = Math.floor((a.y + ((b.y - a.y) * k) / steps - map.origin) / res)
       if (x < 0 || y < 0 || x >= n || y >= n) return false
       const i = y * n + x
-      if (dist[i] < bodyCells && !been[i] && k > 0) return false
+      // the first centimeters from where the robot is are skipped: if it's already close to a wall,
+      // it must still be able to move away from it
+      if (dist[i] < bodyCells && !been[i] && (k * Math.hypot(b.x - a.x, b.y - a.y)) / steps > 0.12) return false
     }
     return true
   }
