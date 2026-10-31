@@ -87,7 +87,8 @@ The first step to run these algorithms on a real robot: a broken Xiaomi Robot Va
   ```
   Without hardware, `node scripts/fake-esp32.mjs` plays the sample capture over the same WebSocket (address `localhost:8081`).
 - **Mapping (SLAM)** (*Mapping* folder, on by default): while the robot cleans on its own, each lidar turn is matched against the map built so far and then added to it, so the robot moves on a map of the room instead of the room spinning around it. It's Hector SLAM (Kohlbrecher et al., 2011): no wheel odometry, Gauss-Newton matching on a bilinearly interpolated log-odds grid, coarse to fine over 3 resolutions (3, 6 and 12 cm), the map updated after moving 4 cm or 3.5°. Each turn takes 0.2 s and the robot can turn 20° or more meanwhile, so the points are first corrected for that motion (*Undo motion blur of a turn*). These robots also spin in place at up to ~180°/s (35° between turns), more than Gauss-Newton converges from, so each match starts with a brute-force search of ±40° and ±10 cm on the 6 cm map; scans that still fit poorly are not added to the map. Without that search, a 2-minute recording of a bedroom and corridor came out as several rotated copies of the room; with it, the map matches the one the robot's own app draws. `npx vite-node scripts/slam-offline.ts capture.bin out` replays a recording through the SLAM and writes the map (PGM) and a per-turn log. On the sample capture, 97% of each turn's points land on mapped walls, at ~1 ms per turn. *Save the map (PNG)* exports the map with the robot's path.
-- **Next:** the ESP32 drives the wheels (encoders + motor drivers) in place of the original board.
+- **Driving it (click on the map, it goes there)**, without replacing its firmware: the robot's own firmware accepts remote-control steps over the local network (miIO protocol, MIoT property `remote-state`, siid 4 / piid 15, value `{"spdv": forward, "spdw": turn}`; on this firmware 60 ≈ 8 cm/s forward and a positive turn is counter-clockwise). `scripts/robot-bridge.mjs` speaks that protocol (UDP, AES with the device token) and takes `/drive?v=&w=`, `/stop` and `/status` over HTTP; it repeats the last command every 200 ms and stops the robot if the page goes quiet for 600 ms. The token comes from [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) and stays in `~/.robo-xiaomi` (`IP=…`, `TOKEN=…`), outside the repo. In the lidar mode, a click on the map plans a path with A* on the SLAM map (walls inflated by the robot's radius, unknown space allowed but costlier, replanned every second) and a look-ahead follower turns it into speed and turn commands (turning in place when facing away). *Drive the robot → Armed* lets commands through; space stops, arrows/WASD drive by hand. The robot also stops when the map match drops under 50% or lidar turns stop arriving. The original firmware keeps its own bumper and cliff safety.
+- **Next:** wheel odometry (the encoders, read like the lidar) for the SLAM in long corridors.
 
 ## Running locally
 
@@ -113,9 +114,9 @@ src/
     sim/           simulations: particle filter (known map) and exploration
     city/          OpenStreetMap city: lane-level road network, routing, city driving, traffic, lidar perception and tracking
     lidar/         decoder for the real robot vacuum's lidar
-    slam/          Hector SLAM: scan matching and occupancy mapping without odometry
+    slam/          Hector SLAM (scan matching, occupancy mapping) and navigation on its map (A*, path follower)
   modes/           the app modes (known map / exploration / city / real lidar)
-  real/            data sources for real hardware (Web Serial, recorded captures)
+  real/            real hardware: lidar data sources (ESP32, Web Serial, captures) and the robot bridge client
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
   maps/            maps in meters (JSON)

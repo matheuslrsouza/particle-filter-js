@@ -3,6 +3,8 @@ import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
 import type { Pose, Vec2 } from '../core/math/vec'
 import { HectorSlam, scanToPoints } from '../core/slam/hector'
+import { DEFAULT_NAV, follow, planOnMap } from '../core/slam/navigate'
+import { RobotBridge } from '../real/robot'
 import sampleUrl from '../real/sample-capture.bin?url'
 import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
 import { CameraRig } from '../render/cameras'
@@ -115,6 +117,7 @@ export function startLidar(): void {
       turns.push(process(rev))
       if (turns.length > MAX_TURNS) turns.shift()
       redraw()
+      if (view.mapping) navigateStep()
     }
   }
 
@@ -159,6 +162,7 @@ export function startLidar(): void {
   }
 
   function resetMap() {
+    clearGoalIfAny()
     slam = new HectorSlam()
     turns = []
     mapPixels.fill(0)
@@ -166,6 +170,9 @@ export function startLidar(): void {
     pathGeo.setFromPoints([])
     redraw()
   }
+
+  // set once the driving section below exists
+  let clearGoalIfAny = () => {}
 
   /** Map cells → texels: free cells dark blue, walls bright, unknown transparent. */
   function uploadMap() {
@@ -322,6 +329,129 @@ export function startLidar(): void {
   cal.close()
   material.size = view.pointSize / 100
 
+  // ---- driving the real robot (scripts/robot-bridge.mjs talks to its own firmware) ----
+  const drive = { armed: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 60, manual: { v: 0, w: 0 } }
+  const bridge = new RobotBridge(drive.bridge)
+  let goal: Vec2 | null = null
+  let plan: Vec2[] | null = null
+  let planFrom = 0
+  let lastNavTurn = 0
+  const planGeo = new THREE.BufferGeometry()
+  const planLine = new THREE.Line(planGeo, new THREE.LineBasicMaterial({ color: 0x4cc9f0 }))
+  planLine.position.y = 0.015
+  planLine.frustumCulled = false
+  const goalMarker = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.1, 32), new THREE.MeshBasicMaterial({ color: 0x4cc9f0, side: THREE.DoubleSide }))
+  goalMarker.rotation.x = -Math.PI / 2
+  goalMarker.visible = false
+  world.add(planLine, goalMarker)
+  const toScreen = (p: Vec2) => new THREE.Vector3(p.y, 0, -p.x)
+
+  function clearGoal(message?: string) {
+    goal = null
+    plan = null
+    goalMarker.visible = false
+    planGeo.setFromPoints([])
+    void bridge.stop()
+    if (message) hud.message(message)
+  }
+
+  function replan(): boolean {
+    if (!goal) return false
+    plan = planOnMap(slam.maps[0], slam.pose, goal)
+    planFrom = 0
+    planGeo.setFromPoints(plan ? plan.map(toScreen) : [])
+    return plan !== null
+  }
+
+  /** Called after each lidar turn: one step of the path follower, sent to the robot. */
+  function navigateStep() {
+    lastNavTurn = performance.now()
+    if (!goal || !plan) return
+    if (slam.lastFit < 0.5) {
+      // lost: better stop than drive blind
+      void bridge.stop()
+      return
+    }
+    // replan every second or so: the map grows and the robot drifts off the line
+    if (slam.scans % 5 === 0 && !replan()) return clearGoal('No path to the goal anymore')
+    const cmd = follow(plan!, slam.pose, DEFAULT_NAV, planFrom)
+    planFrom = cmd.target
+    if (cmd.done) return clearGoal('Arrived')
+    if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
+  }
+
+  // a click on the map (not a drag) sets the goal
+  const raycaster = new THREE.Raycaster()
+  const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+  let down: { x: number; y: number } | null = null
+  renderer.domElement.addEventListener('pointerdown', (e) => (down = { x: e.clientX, y: e.clientY }))
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || e.button !== 0) return
+    const r = renderer.domElement.getBoundingClientRect()
+    raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), rig.camera)
+    const hit = new THREE.Vector3()
+    if (!raycaster.ray.intersectPlane(ground, hit)) return
+    const local = hit.sub(CENTER)
+    goal = { x: -local.z, y: local.x }
+    goalMarker.position.set(local.x, 0.012, local.z)
+    goalMarker.visible = true
+    if (!view.mapping || !slam.trajectory.length) return clearGoal('Build a map first (the robot must see the room)')
+    if (!replan()) return clearGoal('No path there (a wall, or too close to one)')
+    hud.message(drive.armed ? 'Going there' : 'Path planned: arm driving to go')
+  })
+
+  // keyboard: arrows / WASD drive by hand, space stops
+  const keys = new Set<string>()
+  const manualTick = () => {
+    const v = (keys.has('ArrowUp') || keys.has('w') ? 1 : 0) - (keys.has('ArrowDown') || keys.has('s') ? 1 : 0)
+    const w = (keys.has('ArrowLeft') || keys.has('a') ? 1 : 0) - (keys.has('ArrowRight') || keys.has('d') ? 1 : 0)
+    drive.manual = { v, w }
+  }
+  window.addEventListener('keydown', (e) => {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+    if (e.key === ' ') {
+      e.preventDefault()
+      clearGoal('Stopped')
+      return
+    }
+    keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key)
+    manualTick()
+  })
+  window.addEventListener('keyup', (e) => {
+    keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key)
+    manualTick()
+  })
+  setInterval(() => {
+    if (!drive.armed) return
+    const { v, w } = drive.manual
+    if (v || w) {
+      if (goal) clearGoal()
+      void bridge.drive(v * 80, w * 50)
+    } else if (goal && performance.now() - lastNavTurn > 700) {
+      // no lidar turns: the map isn't updating, so stop
+      void bridge.stop()
+    }
+  }, 150)
+
+  clearGoalIfAny = () => {
+    if (goal) clearGoal()
+  }
+  const driveF = gui.addFolder('Drive the robot')
+  driveF.add(drive, 'bridge').name('Bridge address').onFinishChange((u: string) => (bridge.url = u.trim()))
+  driveF
+    .add(drive, 'armed')
+    .name('Armed (robot moves)')
+    .onChange((on: boolean) => {
+      if (!on) return void bridge.stop()
+      bridge.status().then(
+        (s) => hud.message(`Robot connected · battery ${s.battery}%`),
+        () => hud.message('No answer from the bridge: run node scripts/robot-bridge.mjs'),
+      )
+    })
+  driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
+  driveF.add(drive, 'vScale', 200, 1500, 10).name('Speed units per m/s')
+  driveF.add(drive, 'wScale', 10, 150, 1).name('Turn units per rad/s')
+
   window.addEventListener('resize', () => {
     renderer.setSize(container.clientWidth, container.clientHeight)
     rig.resize(container.clientWidth, container.clientHeight)
@@ -376,7 +506,7 @@ export function startLidar(): void {
     else {
       const valid = t.samples.filter((s) => !Number.isNaN(s.distance)).length
       hud.setStatus(
-        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${recording ? ' · ● REC' : ''}`,
+        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${goal ? ` · goal ${Math.hypot(goal.x - slam.pose.x, goal.y - slam.pose.y).toFixed(2)} m${drive.armed ? '' : ' (not armed)'}` : ''}${recording ? ' · ● REC' : ''}`,
       )
     }
     if (mapDirty && now - lastMapUpload > 400) {
