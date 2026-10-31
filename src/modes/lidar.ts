@@ -3,6 +3,8 @@ import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
 import type { Pose, Vec2 } from '../core/math/vec'
 import { HectorSlam, scanToPoints } from '../core/slam/hector'
+import { DEFAULT_NAV, PathFollower, planRoute } from '../core/slam/navigate'
+import { RobotBridge } from '../real/robot'
 import sampleUrl from '../real/sample-capture.bin?url'
 import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
 import { CameraRig } from '../render/cameras'
@@ -17,6 +19,10 @@ const MAX_TURNS = 30
 const MAX_POINTS = 440
 /** Xiaomi S10+ body: 35 cm across */
 const ROBOT_RADIUS = 0.175
+/** the lidar sits 5.75 cm ahead of the body's center (11.75 cm from the front, 23.25 cm from the back) */
+const LIDAR_AHEAD = 0.0575
+/** echoes inside the body (+3 cm) are things carried on the robot: power bank, ESP32, wires */
+const BODY_ECHO = ROBOT_RADIUS + 0.03
 
 /** a turn as drawn: its usable samples, the matching points in the robot frame and where the robot was */
 interface Turn {
@@ -43,10 +49,20 @@ export function startLidar(): void {
   const rig = new CameraRig(renderer.domElement, AREA, { near: 0.02, far: 100, minDistance: 0.5, maxDistance: 25 })
   rig.setMode('top', CENTER2D(), 3)
   const hud = new Hud('Connect the ESP32 or the USB-serial adapter or play the sample capture · <b>right-drag</b> to pan · <b>scroll</b> to zoom')
+  const { log, logOnce } = createLogDrawer()
+  // every toast goes to the log too
+  const toast = hud.message.bind(hud)
+  hud.message = (m: string) => {
+    toast(m)
+    log(m)
+  }
   document.getElementById('charts')!.hidden = true
 
   const world = new THREE.Group()
   world.position.copy(CENTER)
+  // the map is right-handed (x forward, y to the left): drawn with x up, y must go to the screen's
+  // left, so the world is mirrored on the screen's x axis (three.js flips the face winding itself)
+  world.scale.x = -1
   scene.add(world)
   const robot = robotBody()
   const rings = rangeRings()
@@ -89,7 +105,12 @@ export function startLidar(): void {
     pointSize: 4,
     minQuality: 1,
     maxRange: 8,
-    mirror: false,
+    /** closer echoes are the lidar's own head; echoes inside the body are dropped separately */
+    minRange: 0.12,
+    // the lidar's angles grow clockwise: mirrored, the map is right-handed (counter-clockwise turns
+    // are positive), as the robot's remote control and the navigation expect
+    mirror: true,
+    /** where the robot's front is in the lidar's angles (set by "Calibrate front", remembered) */
     rotation: 0,
     colorBy: 'age' as 'age' | 'quality' | 'distance',
     freeze: false,
@@ -115,6 +136,7 @@ export function startLidar(): void {
       turns.push(process(rev))
       if (turns.length > MAX_TURNS) turns.shift()
       redraw()
+      if (view.mapping) navigateStep()
     }
   }
 
@@ -144,14 +166,18 @@ export function startLidar(): void {
     await s?.stop()
   }
 
-  const usable = (s: LidarSample) => !Number.isNaN(s.distance) && s.distance >= 0.12 && s.distance <= view.maxRange && s.quality >= view.minQuality
+  const usable = (s: LidarSample) => !Number.isNaN(s.distance) && s.distance >= view.minRange && s.distance <= view.maxRange && s.quality >= view.minQuality
 
   /** One turn → points in the robot frame; with mapping on, also matched and added to the map. */
   function process(rev: Revolution): Turn {
-    const samples = rev.samples.filter(usable)
+    const raw = rev.samples.filter(usable)
     const opts = { mirror: view.mirror, rotation: view.rotation, minRange: 0, maxRange: Infinity, minQuality: 0 }
-    if (!view.mapping) return { rev, samples, points: scanToPoints(samples, opts), pose: { x: 0, y: 0, theta: 0 } }
-    const points = scanToPoints(samples, { ...opts, motion: view.deskew ? slam.motion : undefined })
+    const all = scanToPoints(raw, { ...opts, motion: view.mapping && view.deskew ? slam.motion : undefined })
+    // drop echoes from inside the robot's own body (the body's center is behind the lidar)
+    const keep = all.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    const samples = raw.filter((_, i) => keep[i])
+    const points = all.filter((_, i) => keep[i])
+    if (!view.mapping) return { rev, samples, points, pose: { x: 0, y: 0, theta: 0 } }
     const before = slam.trajectory.length
     const pose = { ...slam.addScan(points) }
     if (slam.trajectory.length !== before) mapDirty = true
@@ -159,13 +185,17 @@ export function startLidar(): void {
   }
 
   function resetMap() {
+    clearGoalIfAny()
     slam = new HectorSlam()
     turns = []
     mapPixels.fill(0)
     mapTexture.needsUpdate = true
-    pathGeo.setFromPoints([])
+    setLine(pathGeo, [])
     redraw()
   }
+
+  // set once the driving section below exists
+  let clearGoalIfAny = () => {}
 
   /** Map cells → texels: free cells dark blue, walls bright, unknown transparent. */
   function uploadMap() {
@@ -181,7 +211,7 @@ export function startLidar(): void {
       }
     }
     mapTexture.needsUpdate = true
-    pathGeo.setFromPoints(slam.trajectory.map((p) => new THREE.Vector3(p.y, 0, -p.x)))
+    setLine(pathGeo, slam.trajectory.map((p) => new THREE.Vector3(p.y, 0, -p.x)))
   }
 
   function pointColor(s: LidarSample, age: number, out: THREE.Color) {
@@ -306,6 +336,7 @@ export function startLidar(): void {
   look.add(view, 'pointSize', 1, 8, 0.5).name('Point size (cm)').onChange((v: number) => (material.size = v / 100))
   look.add(view, 'minQuality', 0, 100, 1).name('Min quality').onChange(redraw)
   look.add(view, 'maxRange', 0.5, 10, 0.5).name('Max range (m)').onChange(redraw)
+  look.add(view, 'minRange', 0.1, 0.5, 0.01).name('Min range (m)')
   look
     .add({ camera: 'top' }, 'camera', { 'Top-down': 'top', Orbit: 'orbit' })
     .name('Camera')
@@ -316,11 +347,261 @@ export function startLidar(): void {
   mapF.add(view, 'follow').name('Camera follows the robot')
   mapF.add({ reset: resetMap }, 'reset').name('Clear the map')
   mapF.add({ save: () => saveMapImage() }, 'save').name('Save the map (PNG)')
+  try {
+    const r = localStorage.getItem('lidar.rotation')
+    if (r !== null) view.rotation = Number(r)
+  } catch {
+    /* storage blocked */
+  }
   const cal = gui.addFolder('Mounting')
-  cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange(resetMap)
+  const rotCtrl = cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange((r: number) => {
+    try {
+      localStorage.setItem('lidar.rotation', String(r))
+    } catch {
+      /* storage blocked */
+    }
+    resetMap()
+  })
   cal.add(view, 'mirror').name('Mirror (turns the other way)').onChange(resetMap)
   cal.close()
   material.size = view.pointSize / 100
+
+  // ---- driving the real robot (scripts/robot-bridge.mjs talks to its own firmware) ----
+  const drive = { armed: false, lidarOn: false, bridge: 'http://localhost:8090', vScale: 720, wScale: 80, manual: { v: 0, w: 0 } }
+  const bridge = new RobotBridge(drive.bridge)
+  let goal: Vec2 | null = null
+  let plan: Vec2[] | null = null
+  const follower = new PathFollower([], DEFAULT_NAV)
+  let lastPlanMsg = ''
+  let partial = false
+  let navState = ''
+  const setNav = (s: string) => {
+    navState = s
+    logOnce(s)
+  }
+  let stuckSince: { at: number; x: number; y: number } | null = null
+  let backUpUntil = 0
+  let lastNavTurn = 0
+  const planGeo = new THREE.BufferGeometry()
+  const planLine = new THREE.Line(planGeo, new THREE.LineBasicMaterial({ color: 0x4cc9f0 }))
+  planLine.position.y = 0.015
+  planLine.frustumCulled = false
+  const goalMarker = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.1, 32), new THREE.MeshBasicMaterial({ color: 0x4cc9f0, side: THREE.DoubleSide }))
+  goalMarker.rotation.x = -Math.PI / 2
+  goalMarker.visible = false
+  world.add(planLine, goalMarker)
+  const toScreen = (p: Vec2) => new THREE.Vector3(p.y, 0, -p.x)
+  // the SLAM tracks the lidar; planning and driving use the body's center (it turns around it)
+  const center = (p: Pose): Pose => ({ x: p.x - Math.cos(p.theta) * LIDAR_AHEAD, y: p.y - Math.sin(p.theta) * LIDAR_AHEAD, theta: p.theta })
+
+  function clearGoal(message?: string) {
+    goal = null
+    plan = null
+    goalMarker.visible = false
+    setLine(planGeo, [])
+    void bridge.stop()
+    if (message) hud.message(message)
+  }
+
+  function replan(): boolean {
+    if (!goal) return false
+    const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV)
+    plan = route?.path ?? null
+    const len = plan ? plan.reduce((a, q, i) => (i ? a + Math.hypot(q.x - plan![i - 1].x, q.y - plan![i - 1].y) : 0), 0) : 0
+    partial = route?.partial ?? false
+    const msg = plan ? `path: ${len.toFixed(2)} m${partial ? ' (goal not reachable yet: going as close as possible)' : ''}` : 'no path'
+    if (msg !== lastPlanMsg || !plan) log(msg)
+    lastPlanMsg = msg
+    // keeps its latency state (last command) across replans
+    if (route) follower.setPath(route.path, route.bodyClear)
+    setLine(planGeo, plan ? plan.map(toScreen) : [])
+    return plan !== null
+  }
+
+  /** Called after each lidar turn: one step of the path follower, sent to the robot. */
+  function navigateStep() {
+    lastNavTurn = performance.now()
+    if (!goal || !plan) return
+    if (slam.lastFit < 0.5) {
+      // lost: better stop than drive blind
+      setNav('stopped: lost on the map')
+      void bridge.stop()
+      return
+    }
+    // replan every second or so: the map grows and the robot drifts off the line
+    if (slam.scans % 5 === 0 && !replan()) return clearGoal('No path to the goal anymore')
+    // something right in front (an obstacle that isn't in the map yet): stop and let the replan,
+    // which uses the map updated with it, find a way around
+    // (turning in place is still allowed)
+    const cmd = follower.step(center(slam.pose))
+    const latest = turns[turns.length - 1]
+    // in the body's frame: up to 12 cm beyond its front edge, as wide as the body
+    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
+    if (cmd.v > 0 && latest?.points.some(ahead)) {
+      // no forward motion, but keep turning toward the path: turning is what clears the front
+      const w = Math.sign(cmd.w || 1) * Math.max(0.3, Math.abs(cmd.w))
+      if (drive.armed) void bridge.drive(0, w * drive.wScale)
+      setNav('blocked ahead: turning toward the path')
+      // standing still, the map isn't updated: add the obstacle now, then replan around it
+      if (slam.scans % 2 === 0) {
+        slam.insertNow(latest.points)
+        mapDirty = true
+        if (!replan()) clearGoal('Blocked: no way around')
+      }
+      return
+    }
+    if (cmd.done) {
+      // at the end of a partial path, one more replan (the map has grown): a way on, or give up
+      if (partial) {
+        slam.insertNow(latest!.points)
+        if (replan() && !partial) return
+        return clearGoal("Can't reach the goal: this is as close as it gets")
+      }
+      return clearGoal('Arrived')
+    }
+    // stuck (snagged on something the map doesn't show): asked to drive, but not moving. Back up
+    // ~10 cm, add the scan to the map and replan, like the escape of the exploration mode
+    const now = performance.now()
+    const c = center(slam.pose)
+    if (now < backUpUntil) {
+      setNav('stuck: backing up')
+      if (drive.armed) void bridge.drive(-0.08 * drive.vScale, 0)
+      return
+    }
+    if (cmd.v > 0.03) {
+      if (!stuckSince) stuckSince = { at: now, x: c.x, y: c.y }
+      else if (Math.hypot(c.x - stuckSince.x, c.y - stuckSince.y) > 0.03) stuckSince = { at: now, x: c.x, y: c.y }
+      else if (now - stuckSince.at > 2000) {
+        stuckSince = null
+        backUpUntil = now + 1300
+        log(`stuck at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}): backing up`)
+        slam.insertNow(latest!.points)
+        mapDirty = true
+        setTimeout(() => goal && !replan() && clearGoal('Stuck: no way out found'), 1400)
+        return
+      }
+    } else stuckSince = null
+    navState = cmd.v > 0.01 ? `driving ${(cmd.v * 100).toFixed(0)} cm/s` : `turning ${((cmd.w * 180) / Math.PI).toFixed(0)}°/s`
+    // the log gets the kind of motion, not every speed change
+    logOnce(cmd.v > 0.01 ? 'driving' : cmd.w > 0 ? 'turning left in place' : 'turning right in place')
+    if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
+  }
+
+  // a click on the map (not a drag) sets the goal
+  const raycaster = new THREE.Raycaster()
+  const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+  let down: { x: number; y: number } | null = null
+  renderer.domElement.addEventListener('pointerdown', (e) => (down = { x: e.clientX, y: e.clientY }))
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || e.button !== 0) return
+    const r = renderer.domElement.getBoundingClientRect()
+    raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), rig.camera)
+    const hit = new THREE.Vector3()
+    if (!raycaster.ray.intersectPlane(ground, hit)) return
+    // into the (mirrored) world group's frame
+    const local = world.worldToLocal(hit)
+    goal = { x: -local.z, y: local.x }
+    goalMarker.position.set(local.x, 0.012, local.z)
+    goalMarker.visible = true
+    log(`goal (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)})`)
+    if (!view.mapping || !slam.trajectory.length) return clearGoal('Build a map first (the robot must see the room)')
+    if (!replan()) return clearGoal('No path there (a wall, or too close to one)')
+    hud.message(drive.armed ? 'Going there' : 'Path planned: arm driving to go')
+  })
+
+  // keyboard: arrows / WASD drive by hand, space stops
+  const keys = new Set<string>()
+  const manualTick = () => {
+    const v = (keys.has('ArrowUp') || keys.has('w') ? 1 : 0) - (keys.has('ArrowDown') || keys.has('s') ? 1 : 0)
+    const w = (keys.has('ArrowLeft') || keys.has('a') ? 1 : 0) - (keys.has('ArrowRight') || keys.has('d') ? 1 : 0)
+    drive.manual = { v, w }
+  }
+  window.addEventListener('keydown', (e) => {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+    if (e.key === ' ') {
+      e.preventDefault()
+      clearGoal('Stopped')
+      return
+    }
+    keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key)
+    manualTick()
+  })
+  window.addEventListener('keyup', (e) => {
+    keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key)
+    manualTick()
+  })
+  setInterval(() => {
+    const { v, w } = drive.manual
+    if (drive.armed && (v || w)) {
+      if (goal) clearGoal()
+      void bridge.drive(v * 80, w * 50)
+      return
+    }
+    // the firmware only spins the lidar while it gets remote-control steps: zero-speed steps keep
+    // it on (standing still) whenever the follower isn't sending a moving command, and also stop
+    // the robot when lidar turns stop arriving (no map updates, no driving)
+    const following = goal && performance.now() - lastNavTurn < 700
+    if ((drive.armed || drive.lidarOn) && !(following && performance.now() - bridge.lastMoveAt < 400)) void bridge.drive(0, 0)
+  }, 150)
+
+  clearGoalIfAny = () => {
+    if (goal) clearGoal()
+  }
+  const driveF = gui.addFolder('Drive the robot')
+  driveF.add(drive, 'bridge').name('Bridge address').onFinishChange((u: string) => (bridge.url = u.trim()))
+  driveF
+    .add(drive, 'armed')
+    .name('Armed (robot moves)')
+    .onChange((on: boolean) => {
+      if (!on) {
+        void bridge.stop()
+        void bridge.quiet(false)
+        return
+      }
+      // the firmware runs the suction during remote control: lowest power while armed
+      void bridge.quiet(true)
+      bridge.status().then(
+        (s) => hud.message(`Robot connected · battery ${s.battery}%`),
+        () => hud.message('No answer from the bridge: run node scripts/robot-bridge.mjs'),
+      )
+    })
+  driveF.add(drive, 'lidarOn').name('Keep the lidar on (robot still)')
+  // the robot's front, measured: drive straight ahead and see which way the map says it went
+  driveF
+    .add(
+      {
+        calibrate: async () => {
+          if (!drive.armed) return hud.message('Arm driving first (the robot drives ~15 cm forward)')
+          if (!slam.trajectory.length || slam.lastFit < 0.6) return hud.message('Wait for the map first')
+          clearGoal()
+          const p0 = { ...slam.pose }
+          hud.message('Calibrating: driving forward…')
+          drive.manual = { v: 0.75, w: 0 }
+          await new Promise((r) => setTimeout(r, 2500))
+          drive.manual = { v: 0, w: 0 }
+          await new Promise((r) => setTimeout(r, 1200))
+          const dx = slam.pose.x - p0.x
+          const dy = slam.pose.y - p0.y
+          if (Math.hypot(dx, dy) < 0.05) return hud.message('It barely moved: try again with free space in front')
+          // the displacement in the robot frame at the start: its angle is how far off the front is
+          const fx = Math.cos(p0.theta) * dx + Math.sin(p0.theta) * dy
+          const fy = -Math.sin(p0.theta) * dx + Math.cos(p0.theta) * dy
+          const off = (Math.atan2(fy, fx) * 180) / Math.PI
+          let r = Math.round(view.rotation - off)
+          r = ((((r + 180) % 360) + 360) % 360) - 180
+          rotCtrl.setValue(r)
+          hud.message(`Front calibrated: the lidar was ${Math.round(off)}° off, rotation set to ${r}°`)
+        },
+      },
+      'calibrate',
+    )
+    .name('Calibrate front (drives 15 cm)')
+  driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
+  driveF.add(DEFAULT_NAV, 'inflate', 0.18, 0.4, 0.01).name('Wall clearance (m)')
+  driveF.add(DEFAULT_NAV, 'lookahead', 0.2, 0.8, 0.05).name('Look-ahead (m)')
+  driveF.add(DEFAULT_NAV, 'latency', 0, 0.8, 0.05).name('Latency (s)')
+  driveF.add(drive, 'vScale', 200, 1500, 10).name('Speed units per m/s')
+  driveF.add(drive, 'wScale', 10, 150, 1).name('Turn units per rad/s')
 
   window.addEventListener('resize', () => {
     renderer.setSize(container.clientWidth, container.clientHeight)
@@ -339,6 +620,9 @@ export function startLidar(): void {
     for (let r = 0; r < mapSize; r++) img.data.set(mapPixels.subarray(r * mapSize * 4, (r + 1) * mapSize * 4), (mapSize - 1 - r) * mapSize * 4)
     const layer = Object.assign(document.createElement('canvas'), { width: mapSize, height: mapSize })
     layer.getContext('2d')!.putImageData(img, 0, 0)
+    // mirrored like the screen view (the map's y axis points left)
+    ctx.translate(mapSize, 0)
+    ctx.scale(-1, 1)
     ctx.drawImage(layer, 0, 0)
     const g = slam.maps[0]
     ctx.strokeStyle = '#ff2e88'
@@ -360,7 +644,9 @@ export function startLidar(): void {
     })
   }
 
-  const followed = new THREE.Vector3()
+  // where the robot was on the screen last frame (world coordinates, starting at the view center)
+  world.updateMatrixWorld(true)
+  const followed = robot.getWorldPosition(new THREE.Vector3())
   let last = performance.now()
   renderer.setAnimationLoop((now) => {
     const dt = (now - last) / 1000
@@ -376,7 +662,7 @@ export function startLidar(): void {
     else {
       const valid = t.samples.filter((s) => !Number.isNaN(s.distance)).length
       hud.setStatus(
-        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${recording ? ' · ● REC' : ''}`,
+        `${source.label} · ${t.rpm.toFixed(0)} rpm · ${rate.hz.toFixed(1)} turns/s · ${t.samples.length} points/turn · ${Math.round((100 * valid) / t.samples.length)}% echoes · ${parser.packets} packets${view.mapping ? ` · map: fit ${Math.round(slam.lastFit * 100)}%, ${slam.trajectory.length} poses` : ''}${goal ? ` · goal ${Math.hypot(goal.x - slam.pose.x, goal.y - slam.pose.y).toFixed(2)} m${drive.armed ? ` · ${navState}` : ' (not armed)'}` : ''}${recording ? ' · ● REC' : ''}`,
       )
     }
     if (mapDirty && now - lastMapUpload > 400) {
@@ -385,7 +671,7 @@ export function startLidar(): void {
       lastMapUpload = now
     }
     // follow: shift the camera by however much the robot moved, keeping the user's zoom and pan
-    const at = robot.position
+    const at = robot.getWorldPosition(new THREE.Vector3())
     if (view.follow) {
       const d = at.clone().sub(followed)
       rig.camera.position.add(d)
@@ -398,6 +684,14 @@ export function startLidar(): void {
 }
 
 const CENTER2D = () => ({ x: CENTER.x, y: CENTER.z })
+
+/** Replaces a line's points (BufferGeometry.setFromPoints never grows an existing attribute). */
+function setLine(geo: THREE.BufferGeometry, points: THREE.Vector3[]) {
+  const a = new Float32Array(points.length * 3)
+  points.forEach((p, i) => a.set([p.x, p.y, p.z], i * 3))
+  geo.setAttribute('position', new THREE.BufferAttribute(a, 3))
+  geo.computeBoundingSphere()
+}
 
 /** Rings every 0.5 m (brighter every meter) and the axes. */
 function rangeRings(): THREE.Group {
@@ -425,12 +719,62 @@ function robotBody(): THREE.Group {
     new THREE.CylinderGeometry(ROBOT_RADIUS, ROBOT_RADIUS, 0.09, 48),
     new THREE.MeshStandardMaterial({ color: 0xe9edf2, roughness: 0.6, transparent: true, opacity: 0.35 }),
   )
-  body.position.y = 0.045
+  // the group sits at the lidar; the body's center is behind it (+z is backward)
+  body.position.set(0, 0.045, LIDAR_AHEAD)
   const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.03, 24), new THREE.MeshStandardMaterial({ color: 0x39ff88 }))
   tower.position.y = 0.105
   const front = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.07, 3), new THREE.MeshStandardMaterial({ color: 0xff2e88 }))
   front.rotation.x = -Math.PI / 2
-  front.position.set(0, 0.1, -ROBOT_RADIUS + 0.03)
+  front.position.set(0, 0.1, LIDAR_AHEAD - ROBOT_RADIUS + 0.03)
   g.add(body, tower, front)
   return g
+}
+
+/**
+ * A drawer on the left with what the navigation did, time-stamped: goals, paths, motion kinds,
+ * blocks, recoveries, toasts. "Copy" puts it on the clipboard (to paste in a bug report).
+ */
+function createLogDrawer() {
+  const lines: string[] = []
+  const box = document.createElement('div')
+  box.id = 'navlog'
+  box.innerHTML = '<div class="bar"><button type="button" class="toggle">Log ▸</button><button type="button" class="copy">Copy</button><button type="button" class="clear">Clear</button></div><pre></pre>'
+  document.getElementById('hud')!.appendChild(box)
+  const pre = box.querySelector('pre')!
+  const toggle = box.querySelector<HTMLButtonElement>('.toggle')!
+  const open = () => box.classList.contains('open')
+  toggle.onclick = () => {
+    box.classList.toggle('open')
+    toggle.textContent = open() ? 'Log ◂' : 'Log ▸'
+    pre.scrollTop = pre.scrollHeight
+  }
+  box.querySelector<HTMLButtonElement>('.copy')!.onclick = () => {
+    navigator.clipboard.writeText(lines.join('\n')).catch(() => {
+      // no clipboard: select the text so it can be copied by hand
+      const r = document.createRange()
+      r.selectNodeContents(pre)
+      getSelection()?.removeAllRanges()
+      getSelection()?.addRange(r)
+    })
+  }
+  box.querySelector<HTMLButtonElement>('.clear')!.onclick = () => {
+    lines.length = 0
+    pre.textContent = ''
+  }
+  let last = ''
+  const log = (msg: string) => {
+    const t = new Date()
+    const stamp = `${t.toLocaleTimeString('en-GB')}.${String(Math.floor(t.getMilliseconds() / 100))}`
+    lines.push(`${stamp}  ${msg}`)
+    if (lines.length > 500) lines.shift()
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4
+    pre.textContent = lines.join('\n')
+    if (atBottom) pre.scrollTop = pre.scrollHeight
+    last = msg
+  }
+  /** logs only when the message differs from the last one (states, not every step) */
+  const logOnce = (msg: string) => {
+    if (msg !== last) log(msg)
+  }
+  return { log, logOnce }
 }
