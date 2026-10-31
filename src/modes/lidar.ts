@@ -3,7 +3,7 @@ import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
 import type { Pose, Vec2 } from '../core/math/vec'
 import { HectorSlam, scanToPoints } from '../core/slam/hector'
-import { DEFAULT_NAV, PathFollower, planOnMap } from '../core/slam/navigate'
+import { DEFAULT_NAV, PathFollower, planRoute } from '../core/slam/navigate'
 import { RobotBridge } from '../real/robot'
 import sampleUrl from '../real/sample-capture.bin?url'
 import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
@@ -379,9 +379,10 @@ export function startLidar(): void {
 
   function replan(): boolean {
     if (!goal) return false
-    plan = planOnMap(slam.maps[0], slam.pose, goal, DEFAULT_NAV, slam.trajectory)
+    const route = planRoute(slam.maps[0], slam.pose, goal, DEFAULT_NAV, slam.trajectory)
+    plan = route?.path ?? null
     // keeps its latency state (last command) across replans
-    if (plan) follower.setPath(plan)
+    if (route) follower.setPath(route.path, route.bodyClear)
     setLine(planGeo, plan ? plan.map(toScreen) : [])
     return plan !== null
   }
@@ -397,7 +398,17 @@ export function startLidar(): void {
     }
     // replan every second or so: the map grows and the robot drifts off the line
     if (slam.scans % 5 === 0 && !replan()) return clearGoal('No path to the goal anymore')
+    // something right in front (an obstacle that isn't in the map yet): stop and let the replan,
+    // which uses the map updated with it, find a way around
+    // (turning in place is still allowed)
     const cmd = follower.step(slam.pose)
+    const latest = turns[turns.length - 1]
+    const ahead = (q: Vec2) => q.x > 0 && q.x < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
+    if (cmd.v > 0 && latest?.points.some(ahead)) {
+      void bridge.drive(0, 0)
+      if (slam.scans % 3 === 0 && !replan()) clearGoal('Blocked: no way around')
+      return
+    }
     if (cmd.done) return clearGoal('Arrived')
     if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
   }

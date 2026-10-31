@@ -13,6 +13,7 @@ import type { OccupancyGrid } from './hector'
 export interface NavParams {
   /** robot radius plus a margin (m): cells closer than this to a wall are not entered */
   inflate: number
+  robotRadius: number
   /** extra cost per step in unknown cells */
   unknownCost: number
   /** extra cost per step near walls, fading out at `inflate + comfort` */
@@ -36,6 +37,7 @@ export interface NavParams {
 
 export const DEFAULT_NAV: NavParams = {
   inflate: 0.24,
+  robotRadius: 0.175,
   unknownCost: 3,
   comfort: 0.15,
   lookahead: 0.45,
@@ -60,7 +62,19 @@ const BLOCKED = 2
  * cell, or null when the goal can't be reached. The start may be inside the inflated band (the
  * robot can be close to a wall); the walls themselves are never crossed.
  */
+/** A* path (null if unreachable). */
 export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavParams = DEFAULT_NAV, visited: Vec2[] = []): Vec2[] | null {
+  return planRoute(map, start, goal, p, visited)?.path ?? null
+}
+
+export interface Route {
+  path: Vec2[]
+  /** whether the robot's body (radius + 2 cm) can move along a straight segment without touching a wall */
+  bodyClear: (a: Vec2, b: Vec2) => boolean
+}
+
+/** A* path plus a body-clearance check on the same map, for the follower. */
+export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavParams = DEFAULT_NAV, visited: Vec2[] = []): Route | null {
   const n = map.cells
   const res = map.resolution
   const kind = new Uint8Array(n * n)
@@ -190,7 +204,21 @@ export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
     for (let k = 0; k <= steps; k++) if (!clear({ x: a.x + ((b.x - a.x) * k) / steps, y: a.y + ((b.y - a.y) * k) / steps })) return false
     return true
   }
-  return smoothPath(shortcut(cells, segmentClear), clear, p)
+  // the body itself: walls at least the robot's radius (+2 cm) away; the inflated band beyond
+  // the body is only a planning margin
+  const bodyCells = (p.robotRadius + 0.02) / res
+  const bodyClear = (a: Vec2, b: Vec2) => {
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / (res * 0.5)))
+    for (let k = 0; k <= steps; k++) {
+      const x = Math.floor((a.x + ((b.x - a.x) * k) / steps - map.origin) / res)
+      const y = Math.floor((a.y + ((b.y - a.y) * k) / steps - map.origin) / res)
+      if (x < 0 || y < 0 || x >= n || y >= n) return false
+      const i = y * n + x
+      if (dist[i] < bodyCells && !been[i] && k > 0) return false
+    }
+    return true
+  }
+  return { path: smoothPath(shortcut(cells, segmentClear), clear, p), bodyClear }
 }
 
 /** Line of sight: from each kept point, jump to the farthest point it can reach in a straight line. */
@@ -259,10 +287,13 @@ export class PathFollower {
   constructor(
     public path: Vec2[],
     public p: NavParams = DEFAULT_NAV,
+    /** straight-line clearance of the robot's body: aim only at points it can drive straight to */
+    public bodyClear: ((a: Vec2, b: Vec2) => boolean) | null = null,
   ) {}
 
-  setPath(path: Vec2[]): void {
+  setPath(path: Vec2[], bodyClear: ((a: Vec2, b: Vec2) => boolean) | null = this.bodyClear): void {
     this.path = path
+    this.bodyClear = bodyClear
     this.near = 0
   }
 
@@ -287,6 +318,9 @@ export class PathFollower {
     const look = Math.max(0.15, Math.min(p.lookahead, toGoal))
     let target = this.near
     while (target < path.length - 1 && d(target) < look) target++
+    // pure pursuit cuts corners by up to the look-ahead: near a corner, aim at a closer point that
+    // the body can reach in a straight line
+    if (this.bodyClear) while (target > this.near + 1 && !this.bodyClear(pred, path[target])) target--
     const t = path[target]
     const alpha = wrapAngle(Math.atan2(t.y - pred.y, t.x - pred.x) - pred.theta)
     // hysteresis between turning in place and driving

@@ -79,7 +79,7 @@ describe('Hector SLAM', () => {
 
 describe('navigating the SLAM map', () => {
   it('plans around walls and drives a simulated robot to the goal', async () => {
-    const { planOnMap, PathFollower } = await import('./slam/navigate')
+    const { planRoute, PathFollower } = await import('./slam/navigate')
     const rng = new Rng(7)
     const scene = room()
     const slam = new HectorSlam()
@@ -101,10 +101,11 @@ describe('navigating the SLAM map', () => {
     const goal = toLocal(goalWorld)
     let truth = { ...start }
     slam.addScan(scanAt(truth))
-    const path = planOnMap(slam.maps[0], slam.pose, goal)
-    expect(path).not.toBeNull()
+    const route = planRoute(slam.maps[0], slam.pose, goal)
+    expect(route).not.toBeNull()
+    const path = route!.path
     // drive: 5 Hz, kinematic unicycle, and like the real loop the commands take effect ~0.3 s late
-    const follower = new PathFollower(path!)
+    const follower = new PathFollower(path, undefined, route!.bodyClear)
     const queue: { v: number; w: number }[] = [{ v: 0, w: 0 }, { v: 0, w: 0 }]
     let done = false
     let reversals = 0
