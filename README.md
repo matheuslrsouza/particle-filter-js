@@ -70,6 +70,15 @@ Pick **Mode → City** in the panel, or open `?mode=city`. Downtown Mountain Vie
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), ODbL.
 
+## Real lidar mode (robot vacuum)
+
+The first step to run these algorithms on a real robot: a broken Xiaomi Robot Vacuum S10+ (B105, made by Dreame), whose 2D lidar ("D2M") we read directly.
+
+- **Wiring (for now):** the lidar stays connected to the robot's own board, which powers it and spins it while cleaning. Two wires soldered on the lidar board (TX and GND pads, next to its 4-pin connector) go to a USB-serial adapter set to 3.3 V: TX → RXI, GND → GND.
+- **Protocol** (decoded from a capture; not documented anywhere we found): 115200 baud, 8N1, 3.3 V, 36-byte packets `55 AA 03 08 | speed | start angle | 8 × (distance mm, quality) | end angle | check`, little-endian. Speed = rpm × 64, angle = (raw − 0xA000) / 64 degrees, distance 0x8000 = no echo. It matches the Camsense X1 lidar format. About 310–330 rpm (~5 turns/s) and ~390 points per turn. The checksum algorithm is still unknown, so packets are validated by their structure.
+- **The mode** (`?mode=lidar`, *Real lidar* in the mode menu) shows the point cloud live, with the last turns fading out. *Connect USB-serial* uses Web Serial (Chrome or Edge on a computer); *Play sample capture* replays a 30 s capture of the real robot inside a box, so it works without hardware. *Record raw bytes* saves new captures as `.bin` files, which *Open a capture* plays back. *Mounting* rotates or mirrors the scan until angle 0 matches the robot's front.
+- **Next:** an ESP32 reads the lidar and sends it over Wi-Fi, then drives the wheels (encoders + motor drivers) in place of the original board.
+
 ## Running locally
 
 ```bash
@@ -93,7 +102,9 @@ src/
     control/       MPC (iLQR) and speed profile, PID path follower (with forward/reverse gears), twiddle
     sim/           simulations: particle filter (known map) and exploration
     city/          OpenStreetMap city: lane-level road network, routing, city driving, traffic, lidar perception and tracking
-  modes/           the app modes (known map / exploration / city)
+    lidar/         decoder for the real robot vacuum's lidar
+  modes/           the app modes (known map / exploration / city / real lidar)
+  real/            data sources for real hardware (Web Serial, recorded captures)
   render/          three.js scene, car, particles, lidar, plans, search tree, cameras
   ui/              HUD, control panel, twiddle worker
   maps/            maps in meters (JSON)
