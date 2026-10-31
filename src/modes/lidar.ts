@@ -19,6 +19,10 @@ const MAX_TURNS = 30
 const MAX_POINTS = 440
 /** Xiaomi S10+ body: 35 cm across */
 const ROBOT_RADIUS = 0.175
+/** the lidar sits 5.75 cm ahead of the body's center (11.75 cm from the front, 23.25 cm from the back) */
+const LIDAR_AHEAD = 0.0575
+/** echoes inside the body (+3 cm) are things carried on the robot: power bank, ESP32, wires */
+const BODY_ECHO = ROBOT_RADIUS + 0.03
 
 /** a turn as drawn: its usable samples, the matching points in the robot frame and where the robot was */
 interface Turn {
@@ -94,8 +98,8 @@ export function startLidar(): void {
     pointSize: 4,
     minQuality: 1,
     maxRange: 8,
-    /** closer echoes are the robot itself (power bank, ESP32, wires on top of it) */
-    minRange: 0.22,
+    /** closer echoes are the lidar's own head; echoes inside the body are dropped separately */
+    minRange: 0.12,
     // the lidar's angles grow clockwise: mirrored, the map is right-handed (counter-clockwise turns
     // are positive), as the robot's remote control and the navigation expect
     mirror: true,
@@ -159,10 +163,14 @@ export function startLidar(): void {
 
   /** One turn → points in the robot frame; with mapping on, also matched and added to the map. */
   function process(rev: Revolution): Turn {
-    const samples = rev.samples.filter(usable)
+    const raw = rev.samples.filter(usable)
     const opts = { mirror: view.mirror, rotation: view.rotation, minRange: 0, maxRange: Infinity, minQuality: 0 }
-    if (!view.mapping) return { rev, samples, points: scanToPoints(samples, opts), pose: { x: 0, y: 0, theta: 0 } }
-    const points = scanToPoints(samples, { ...opts, motion: view.deskew ? slam.motion : undefined })
+    const all = scanToPoints(raw, { ...opts, motion: view.mapping && view.deskew ? slam.motion : undefined })
+    // drop echoes from inside the robot's own body (the body's center is behind the lidar)
+    const keep = all.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    const samples = raw.filter((_, i) => keep[i])
+    const points = all.filter((_, i) => keep[i])
+    if (!view.mapping) return { rev, samples, points, pose: { x: 0, y: 0, theta: 0 } }
     const before = slam.trajectory.length
     const pose = { ...slam.addScan(points) }
     if (slam.trajectory.length !== before) mapDirty = true
@@ -367,6 +375,8 @@ export function startLidar(): void {
   goalMarker.visible = false
   world.add(planLine, goalMarker)
   const toScreen = (p: Vec2) => new THREE.Vector3(p.y, 0, -p.x)
+  // the SLAM tracks the lidar; planning and driving use the body's center (it turns around it)
+  const center = (p: Pose): Pose => ({ x: p.x - Math.cos(p.theta) * LIDAR_AHEAD, y: p.y - Math.sin(p.theta) * LIDAR_AHEAD, theta: p.theta })
 
   function clearGoal(message?: string) {
     goal = null
@@ -379,7 +389,7 @@ export function startLidar(): void {
 
   function replan(): boolean {
     if (!goal) return false
-    const route = planRoute(slam.maps[0], slam.pose, goal, DEFAULT_NAV, slam.trajectory)
+    const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV, slam.trajectory.map(center))
     plan = route?.path ?? null
     // keeps its latency state (last command) across replans
     if (route) follower.setPath(route.path, route.bodyClear)
@@ -401,9 +411,10 @@ export function startLidar(): void {
     // something right in front (an obstacle that isn't in the map yet): stop and let the replan,
     // which uses the map updated with it, find a way around
     // (turning in place is still allowed)
-    const cmd = follower.step(slam.pose)
+    const cmd = follower.step(center(slam.pose))
     const latest = turns[turns.length - 1]
-    const ahead = (q: Vec2) => q.x > 0 && q.x < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
+    // in the body's frame: up to 12 cm beyond its front edge, as wide as the body
+    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
     if (cmd.v > 0 && latest?.points.some(ahead)) {
       void bridge.drive(0, 0)
       if (slam.scans % 3 === 0 && !replan()) clearGoal('Blocked: no way around')
@@ -644,12 +655,13 @@ function robotBody(): THREE.Group {
     new THREE.CylinderGeometry(ROBOT_RADIUS, ROBOT_RADIUS, 0.09, 48),
     new THREE.MeshStandardMaterial({ color: 0xe9edf2, roughness: 0.6, transparent: true, opacity: 0.35 }),
   )
-  body.position.y = 0.045
+  // the group sits at the lidar; the body's center is behind it (+z is backward)
+  body.position.set(0, 0.045, LIDAR_AHEAD)
   const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.03, 24), new THREE.MeshStandardMaterial({ color: 0x39ff88 }))
   tower.position.y = 0.105
   const front = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.07, 3), new THREE.MeshStandardMaterial({ color: 0xff2e88 }))
   front.rotation.x = -Math.PI / 2
-  front.position.set(0, 0.1, -ROBOT_RADIUS + 0.03)
+  front.position.set(0, 0.1, LIDAR_AHEAD - ROBOT_RADIUS + 0.03)
   g.add(body, tower, front)
   return g
 }
