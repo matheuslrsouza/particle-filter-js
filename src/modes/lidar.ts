@@ -94,6 +94,7 @@ export function startLidar(): void {
     // the lidar's angles grow clockwise: mirrored, the map is right-handed (counter-clockwise turns
     // are positive), as the robot's remote control and the navigation expect
     mirror: true,
+    /** where the robot's front is in the lidar's angles (set by "Calibrate front", remembered) */
     rotation: 0,
     colorBy: 'age' as 'age' | 'quality' | 'distance',
     freeze: false,
@@ -325,8 +326,21 @@ export function startLidar(): void {
   mapF.add(view, 'follow').name('Camera follows the robot')
   mapF.add({ reset: resetMap }, 'reset').name('Clear the map')
   mapF.add({ save: () => saveMapImage() }, 'save').name('Save the map (PNG)')
+  try {
+    const r = localStorage.getItem('lidar.rotation')
+    if (r !== null) view.rotation = Number(r)
+  } catch {
+    /* storage blocked */
+  }
   const cal = gui.addFolder('Mounting')
-  cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange(resetMap)
+  const rotCtrl = cal.add(view, 'rotation', -180, 180, 1).name('Rotation (°)').onChange((r: number) => {
+    try {
+      localStorage.setItem('lidar.rotation', String(r))
+    } catch {
+      /* storage blocked */
+    }
+    resetMap()
+  })
   cal.add(view, 'mirror').name('Mirror (turns the other way)').onChange(resetMap)
   cal.close()
   material.size = view.pointSize / 100
@@ -459,6 +473,36 @@ export function startLidar(): void {
       )
     })
   driveF.add(drive, 'lidarOn').name('Keep the lidar on (robot still)')
+  // the robot's front, measured: drive straight ahead and see which way the map says it went
+  driveF
+    .add(
+      {
+        calibrate: async () => {
+          if (!drive.armed) return hud.message('Arm driving first (the robot drives ~15 cm forward)')
+          if (!slam.trajectory.length || slam.lastFit < 0.6) return hud.message('Wait for the map first')
+          clearGoal()
+          const p0 = { ...slam.pose }
+          hud.message('Calibrating: driving forward…')
+          drive.manual = { v: 0.75, w: 0 }
+          await new Promise((r) => setTimeout(r, 2500))
+          drive.manual = { v: 0, w: 0 }
+          await new Promise((r) => setTimeout(r, 1200))
+          const dx = slam.pose.x - p0.x
+          const dy = slam.pose.y - p0.y
+          if (Math.hypot(dx, dy) < 0.05) return hud.message('It barely moved: try again with free space in front')
+          // the displacement in the robot frame at the start: its angle is how far off the front is
+          const fx = Math.cos(p0.theta) * dx + Math.sin(p0.theta) * dy
+          const fy = -Math.sin(p0.theta) * dx + Math.cos(p0.theta) * dy
+          const off = (Math.atan2(fy, fx) * 180) / Math.PI
+          let r = Math.round(view.rotation - off)
+          r = ((((r + 180) % 360) + 360) % 360) - 180
+          rotCtrl.setValue(r)
+          hud.message(`Front calibrated: the lidar was ${Math.round(off)}° off, rotation set to ${r}°`)
+        },
+      },
+      'calibrate',
+    )
+    .name('Calibrate front (drives 15 cm)')
   driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
   driveF.add(drive, 'vScale', 200, 1500, 10).name('Speed units per m/s')
   driveF.add(drive, 'wScale', 10, 150, 1).name('Turn units per rad/s')
