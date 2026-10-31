@@ -52,8 +52,8 @@ describe('lidar decoder', () => {
     const revs = parser.push(bytes).map((p) => asm.add(p)).filter((r) => r !== null)
     expect(parser.packets).toBeGreaterThan(7800)
     expect(parser.skipped).toBeLessThan(100)
-    // the first turn is partial (the capture started mid-turn)
-    const full = revs.slice(1)
+    // the capture started mid-turn: that partial turn is not emitted
+    const full = revs
     expect(full.length).toBeGreaterThan(150)
     for (const r of full) {
       expect(r.samples.length).toBeGreaterThan(370)
