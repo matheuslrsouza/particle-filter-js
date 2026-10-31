@@ -3,7 +3,7 @@ import * as THREE from 'three'
 import { CamsenseParser, RevolutionAssembler, type LidarSample, type Revolution } from '../core/lidar/camsense'
 import type { Pose, Vec2 } from '../core/math/vec'
 import { HectorSlam, scanToPoints } from '../core/slam/hector'
-import { DEFAULT_NAV, follow, planOnMap } from '../core/slam/navigate'
+import { DEFAULT_NAV, PathFollower, planOnMap } from '../core/slam/navigate'
 import { RobotBridge } from '../real/robot'
 import sampleUrl from '../real/sample-capture.bin?url'
 import { hasWebSerial, ReplaySource, SerialSource, WebSocketSource, type ByteSource } from '../real/sources'
@@ -356,7 +356,7 @@ export function startLidar(): void {
   const bridge = new RobotBridge(drive.bridge)
   let goal: Vec2 | null = null
   let plan: Vec2[] | null = null
-  let planFrom = 0
+  const follower = new PathFollower([], DEFAULT_NAV)
   let lastNavTurn = 0
   const planGeo = new THREE.BufferGeometry()
   const planLine = new THREE.Line(planGeo, new THREE.LineBasicMaterial({ color: 0x4cc9f0 }))
@@ -380,7 +380,8 @@ export function startLidar(): void {
   function replan(): boolean {
     if (!goal) return false
     plan = planOnMap(slam.maps[0], slam.pose, goal, DEFAULT_NAV, slam.trajectory)
-    planFrom = 0
+    // keeps its latency state (last command) across replans
+    if (plan) follower.setPath(plan)
     setLine(planGeo, plan ? plan.map(toScreen) : [])
     return plan !== null
   }
@@ -396,8 +397,7 @@ export function startLidar(): void {
     }
     // replan every second or so: the map grows and the robot drifts off the line
     if (slam.scans % 5 === 0 && !replan()) return clearGoal('No path to the goal anymore')
-    const cmd = follow(plan!, slam.pose, DEFAULT_NAV, planFrom)
-    planFrom = cmd.target
+    const cmd = follower.step(slam.pose)
     if (cmd.done) return clearGoal('Arrived')
     if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
   }
@@ -511,6 +511,9 @@ export function startLidar(): void {
     )
     .name('Calibrate front (drives 15 cm)')
   driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
+  driveF.add(DEFAULT_NAV, 'inflate', 0.18, 0.4, 0.01).name('Wall clearance (m)')
+  driveF.add(DEFAULT_NAV, 'lookahead', 0.2, 0.8, 0.05).name('Look-ahead (m)')
+  driveF.add(DEFAULT_NAV, 'latency', 0, 0.8, 0.05).name('Latency (s)')
   driveF.add(drive, 'vScale', 200, 1500, 10).name('Speed units per m/s')
   driveF.add(drive, 'wScale', 10, 150, 1).name('Turn units per rad/s')
 

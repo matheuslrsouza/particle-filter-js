@@ -5,8 +5,9 @@ import type { OccupancyGrid } from './hector'
 
 /**
  * Going to a point of the SLAM map: A* on the map (walls inflated by the robot's radius, unknown
- * space allowed but more expensive) and a follower for a differential-drive robot (turn in place
- * when facing away, otherwise drive toward a look-ahead point while steering).
+ * space allowed but more expensive), the cell staircase cut by line of sight and smoothed (the
+ * course's gradient smoothing, kept clear of walls), and a pure-pursuit follower for a
+ * differential-drive robot that compensates the loop's latency.
  */
 
 export interface NavParams {
@@ -17,26 +18,36 @@ export interface NavParams {
   /** extra cost per step near walls, fading out at `inflate + comfort` */
   comfort: number
   lookahead: number
+  /** seconds between a command and its effect showing in the map (SLAM rate + Wi-Fi + firmware) */
+  latency: number
   /** goal reached within this distance */
   arrive: number
   /** forward speed (m/s) and turn rate limit (rad/s) */
   vMax: number
   wMax: number
-  /** heading error (rad) above which the robot turns in place */
+  /** heading error (rad) above which the robot turns in place, and below which it drives again */
   turnInPlace: number
+  turnDone: number
   kHeading: number
+  /** gradient smoothing weights (pull toward the cut path / toward the neighbors) */
+  weightData: number
+  weightSmooth: number
 }
 
 export const DEFAULT_NAV: NavParams = {
   inflate: 0.24,
   unknownCost: 3,
   comfort: 0.15,
-  lookahead: 0.3,
+  lookahead: 0.45,
+  latency: 0.3,
   arrive: 0.12,
   vMax: 0.12,
   wMax: 0.6,
-  turnInPlace: 0.7,
-  kHeading: 1.5,
+  turnInPlace: 1.2,
+  turnDone: 0.35,
+  kHeading: 1.2,
+  weightData: 0.1,
+  weightSmooth: 0.35,
 }
 
 /** Cell kinds on the planning grid. */
@@ -157,12 +168,73 @@ export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
     }
   }
   if (parent[g] < 0 && g !== s) return null
-  const path: Vec2[] = []
+  const cells: Vec2[] = []
   for (let i = g; i >= 0; i = parent[i]) {
-    path.push({ x: map.origin + ((i % n) + 0.5) * res, y: map.origin + (((i / n) | 0) + 0.5) * res })
+    cells.push({ x: map.origin + ((i % n) + 0.5) * res, y: map.origin + (((i / n) | 0) + 0.5) * res })
     if (i === s) break
   }
-  return path.reverse()
+  cells.reverse()
+
+  // a point is clear when it's not in the inflated band, except near the start (the robot may be
+  // starting close to a wall) and where the robot has been
+  const clear = (v: Vec2) => {
+    const x = Math.floor((v.x - map.origin) / res)
+    const y = Math.floor((v.y - map.origin) / res)
+    if (x < 0 || y < 0 || x >= n || y >= n) return false
+    const i = y * n + x
+    if (dist[i] === 0) return false
+    return kind[i] !== BLOCKED || been[i] === 1 || Math.hypot(v.x - start.x, v.y - start.y) < p.inflate
+  }
+  const segmentClear = (a: Vec2, b: Vec2) => {
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / (res * 0.5)))
+    for (let k = 0; k <= steps; k++) if (!clear({ x: a.x + ((b.x - a.x) * k) / steps, y: a.y + ((b.y - a.y) * k) / steps })) return false
+    return true
+  }
+  return smoothPath(shortcut(cells, segmentClear), clear, p)
+}
+
+/** Line of sight: from each kept point, jump to the farthest point it can reach in a straight line. */
+function shortcut(path: Vec2[], segmentClear: (a: Vec2, b: Vec2) => boolean): Vec2[] {
+  if (path.length < 3) return path
+  const out = [path[0]]
+  let i = 0
+  while (i < path.length - 1) {
+    let j = path.length - 1
+    while (j > i + 1 && !segmentClear(path[i], path[j])) j--
+    out.push(path[j])
+    i = j
+  }
+  return out
+}
+
+/**
+ * Resampled every 5 cm, then the gradient smoothing of the course (endpoints fixed); points that
+ * would end up in the inflated band are pulled back toward the straight path.
+ */
+function smoothPath(corners: Vec2[], clear: (v: Vec2) => boolean, p: NavParams): Vec2[] {
+  const pts: Vec2[] = []
+  for (let k = 0; k < corners.length - 1; k++) {
+    const a = corners[k]
+    const b = corners[k + 1]
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 0.05))
+    for (let t = 0; t < steps; t++) pts.push({ x: a.x + ((b.x - a.x) * t) / steps, y: a.y + ((b.y - a.y) * t) / steps })
+  }
+  pts.push(corners[corners.length - 1])
+  if (pts.length < 3) return pts
+  const out = pts.map((q) => ({ ...q }))
+  for (let iter = 0; iter < 500; iter++) {
+    let change = 0
+    for (let i = 1; i < out.length - 1; i++) {
+      const old = { ...out[i] }
+      for (const k of ['x', 'y'] as const) {
+        out[i][k] += p.weightData * (pts[i][k] - out[i][k]) + p.weightSmooth * (out[i - 1][k] + out[i + 1][k] - 2 * out[i][k])
+      }
+      if (!clear(out[i])) out[i] = old
+      change += Math.abs(old.x - out[i].x) + Math.abs(old.y - out[i].y)
+    }
+    if (change < 1e-4) break
+  }
+  return out
 }
 
 export interface Command {
@@ -170,27 +242,74 @@ export interface Command {
   v: number
   w: number
   done: boolean
-  /** index of the path point being steered at */
+  /** index of the path point nearest to the robot */
   target: number
 }
 
-/** Look-ahead follower for a robot that can turn in place. */
-export function follow(path: Vec2[], pose: Pose, p: NavParams = DEFAULT_NAV, from = 0): Command {
-  const last = path[path.length - 1]
-  if (!last || Math.hypot(last.x - pose.x, last.y - pose.y) < p.arrive) return { v: 0, w: 0, done: true, target: path.length - 1 }
-  // the nearest path point from where we were, then the first one beyond the look-ahead distance
-  let near = from
-  for (let i = from; i < Math.min(path.length, from + 40); i++) {
-    if (Math.hypot(path[i].x - pose.x, path[i].y - pose.y) < Math.hypot(path[near].x - pose.x, path[near].y - pose.y)) near = i
+/**
+ * Pure pursuit for a robot that can turn in place, on a pose predicted `latency` seconds ahead
+ * with the last command (the map lags the robot: steering on the stale pose overshoots and
+ * zigzags). Turns in place above `turnInPlace` of heading error until under `turnDone`.
+ */
+export class PathFollower {
+  private last = { v: 0, w: 0 }
+  private turning = false
+  private near = 0
+
+  constructor(
+    public path: Vec2[],
+    public p: NavParams = DEFAULT_NAV,
+  ) {}
+
+  setPath(path: Vec2[]): void {
+    this.path = path
+    this.near = 0
   }
-  let target = near
-  while (target < path.length - 1 && Math.hypot(path[target].x - pose.x, path[target].y - pose.y) < p.lookahead) target++
-  const t = path[target]
-  const err = wrapAngle(Math.atan2(t.y - pose.y, t.x - pose.x) - pose.theta)
-  const w = Math.max(-p.wMax, Math.min(p.wMax, p.kHeading * err))
-  if (Math.abs(err) > p.turnInPlace) return { v: 0, w, done: false, target: near }
-  // slow down when the heading is off and near the goal
-  const toGoal = Math.hypot(last.x - pose.x, last.y - pose.y)
-  const v = p.vMax * Math.cos(err) * Math.min(1, toGoal / 0.3 + 0.3)
-  return { v, w, done: false, target: near }
+
+  step(pose: Pose): Command {
+    const { path, p } = this
+    const last = path[path.length - 1]
+    if (!last || Math.hypot(last.x - pose.x, last.y - pose.y) < p.arrive) {
+      this.last = { v: 0, w: 0 }
+      return { v: 0, w: 0, done: true, target: path.length - 1 }
+    }
+    // where the robot will be when this command takes effect
+    const L = p.latency
+    const th = pose.theta + this.last.w * L
+    const pred = {
+      x: pose.x + Math.cos(pose.theta + (this.last.w * L) / 2) * this.last.v * L,
+      y: pose.y + Math.sin(pose.theta + (this.last.w * L) / 2) * this.last.v * L,
+      theta: th,
+    }
+    const d = (i: number) => Math.hypot(path[i].x - pred.x, path[i].y - pred.y)
+    for (let i = this.near; i < Math.min(path.length, this.near + 60); i++) if (d(i) < d(this.near)) this.near = i
+    const toGoal = Math.hypot(last.x - pred.x, last.y - pred.y)
+    const look = Math.max(0.15, Math.min(p.lookahead, toGoal))
+    let target = this.near
+    while (target < path.length - 1 && d(target) < look) target++
+    const t = path[target]
+    const alpha = wrapAngle(Math.atan2(t.y - pred.y, t.x - pred.x) - pred.theta)
+    // hysteresis between turning in place and driving
+    if (this.turning ? Math.abs(alpha) > p.turnDone : Math.abs(alpha) > p.turnInPlace) {
+      this.turning = true
+      const w = Math.sign(alpha) * Math.min(p.wMax, p.kHeading * Math.abs(alpha) + 0.15)
+      this.last = { v: 0, w }
+      return { v: 0, w, done: false, target: this.near }
+    }
+    this.turning = false
+    // pure pursuit: the arc through the target point has curvature 2·sin(α)/distance
+    const dist = Math.max(d(target), 1e-3)
+    const kappa = (2 * Math.sin(alpha)) / dist
+    let v = p.vMax * Math.min(1, toGoal / 0.3 + 0.35)
+    // slow down so the turn rate stays within its limit
+    if (Math.abs(v * kappa) > p.wMax) v = p.wMax / Math.abs(kappa)
+    const w = v * kappa
+    this.last = { v, w }
+    return { v, w, done: false, target: this.near }
+  }
+}
+
+/** One step of a fresh follower (kept for simple callers). */
+export function follow(path: Vec2[], pose: Pose, p: NavParams = DEFAULT_NAV): Command {
+  return new PathFollower(path, p).step(pose)
 }

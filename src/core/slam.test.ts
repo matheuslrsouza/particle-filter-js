@@ -79,7 +79,7 @@ describe('Hector SLAM', () => {
 
 describe('navigating the SLAM map', () => {
   it('plans around walls and drives a simulated robot to the goal', async () => {
-    const { planOnMap, follow } = await import('./slam/navigate')
+    const { planOnMap, PathFollower } = await import('./slam/navigate')
     const rng = new Rng(7)
     const scene = room()
     const slam = new HectorSlam()
@@ -103,14 +103,24 @@ describe('navigating the SLAM map', () => {
     slam.addScan(scanAt(truth))
     const path = planOnMap(slam.maps[0], slam.pose, goal)
     expect(path).not.toBeNull()
-    // drive: 5 Hz, kinematic unicycle
-    let from = 0
+    // drive: 5 Hz, kinematic unicycle, and like the real loop the commands take effect ~0.3 s late
+    const follower = new PathFollower(path!)
+    const queue: { v: number; w: number }[] = [{ v: 0, w: 0 }, { v: 0, w: 0 }]
     let done = false
+    let reversals = 0
+    let lastSign = 0
     for (let k = 0; k < 600 && !done; k++) {
-      const cmd = follow(path!, slam.pose, undefined, from)
-      from = cmd.target
+      const cmd = follower.step(slam.pose)
       done = cmd.done
-      truth = { x: truth.x + Math.cos(truth.theta) * cmd.v * 0.2, y: truth.y + Math.sin(truth.theta) * cmd.v * 0.2, theta: truth.theta + cmd.w * 0.2 }
+      queue.push(cmd)
+      const act = queue.shift()!
+      truth = { x: truth.x + Math.cos(truth.theta) * act.v * 0.2, y: truth.y + Math.sin(truth.theta) * act.v * 0.2, theta: truth.theta + act.w * 0.2 }
+      // zigzag: the turn command flipping sign while driving
+      if (cmd.v > 0.02 && Math.abs(cmd.w) > 0.1) {
+        const sg = Math.sign(cmd.w)
+        if (lastSign && sg !== lastSign) reversals++
+        lastSign = sg
+      }
       // never inside the box (1.5..2.1, −1.2..−0.6) with the robot's 17.5 cm radius
       const inBox = truth.x > 1.5 - 0.17 && truth.x < 2.1 + 0.17 && truth.y > -1.2 - 0.17 && truth.y < -0.6 + 0.17
       expect(inBox).toBe(false)
@@ -118,6 +128,7 @@ describe('navigating the SLAM map', () => {
     }
     expect(done).toBe(true)
     expect(Math.hypot(truth.x - goalWorld.x, truth.y - goalWorld.y)).toBeLessThan(0.2)
+    expect(reversals).toBeLessThan(4)
   })
 })
 
