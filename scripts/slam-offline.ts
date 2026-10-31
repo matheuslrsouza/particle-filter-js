@@ -13,7 +13,7 @@ const slam = new HectorSlam()
 const log: string[] = []
 turns.forEach((t, i) => {
   const s = t!.samples.filter((s) => !Number.isNaN(s.distance) && s.distance >= minRange && s.distance <= 8 && s.quality >= 1)
-  slam.addScan(scanToPoints(s, { mirror: false, rotation: 0, minRange: 0, maxRange: Infinity, minQuality: 0, motion: slam.motion }))
+  slam.addScan(scanToPoints(s, { mirror: process.env.MIRROR !== '0', rotation: 0, minRange: 0, maxRange: Infinity, minQuality: 0, motion: slam.motion }))
   const m = slam.motion
   log.push(`${i}\t${(i / 5).toFixed(1)}\t${slam.lastFit.toFixed(2)}\t${((m.theta * 180) / Math.PI).toFixed(1)}\t${slam.pose.x.toFixed(2)}\t${slam.pose.y.toFixed(2)}\t${((slam.pose.theta * 180) / Math.PI).toFixed(0)}\t${s.length}`)
 })

@@ -43,3 +43,21 @@ h1 span { color: var(--accent); }
   #charts { display: none; }
   #toast { top: auto; bottom: 48px; }
 }
+#navlog {
+  position: absolute; left: 16px; top: 172px; bottom: 16px; width: 34px; display: flex; flex-direction: column; gap: 6px;
+  pointer-events: none;
+}
+#navlog > * { pointer-events: auto; }
+#navlog .bar { display: flex; gap: 4px; }
+#navlog button {
+  font: 12px system-ui, sans-serif; color: var(--fg); background: var(--panel); border: 1px solid rgba(140, 160, 190, 0.3);
+  border-radius: 6px; padding: 4px 8px; cursor: pointer;
+}
+#navlog .copy, #navlog .clear, #navlog pre { display: none; }
+#navlog.open { width: min(380px, calc(100vw - 32px)); }
+#navlog.open .copy, #navlog.open .clear { display: inline-block; }
+#navlog.open pre {
+  display: block; margin: 0; flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; border-radius: 10px;
+  background: var(--panel); backdrop-filter: blur(6px); font: 11.5px/1.45 ui-monospace, Menlo, monospace; color: var(--fg);
+  white-space: pre-wrap;
+}
