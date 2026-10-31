@@ -130,6 +130,32 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
   }
   const inflateCells = p.inflate / res
   for (let i = 0; i < n * n; i++) if (dist[i] <= inflateCells && !been[i]) kind[i] = BLOCKED
+  // distance to unseen space, from the free side: thin things (a door frame, a chair leg) show up
+  // late, so the path keeps away from the edge of what the lidar has seen
+  const unseen = new Float32Array(n * n).fill(Infinity)
+  const uq: number[] = []
+  for (let i = 0; i < n * n; i++) {
+    if (kind[i] !== UNKNOWN) continue
+    const x = i % n
+    const y = (i / n) | 0
+    if ((x > 0 && kind[i - 1] === FREE) || (x < n - 1 && kind[i + 1] === FREE) || (y > 0 && kind[i - n] === FREE) || (y < n - 1 && kind[i + n] === FREE)) {
+      unseen[i] = 0
+      uq.push(i)
+    }
+  }
+  for (let head = 0; head < uq.length; head++) {
+    const i = uq[head]
+    const d = unseen[i] + 1
+    if (d > reach) continue
+    const x = i % n
+    const y = (i / n) | 0
+    for (const j of [x > 0 ? i - 1 : -1, x < n - 1 ? i + 1 : -1, y > 0 ? i - n : -1, y < n - 1 ? i + n : -1]) {
+      if (j >= 0 && kind[j] === FREE && unseen[j] > d) {
+        unseen[j] = d
+        uq.push(j)
+      }
+    }
+  }
 
   const cell = (v: Vec2): [number, number] => [Math.floor((v.x - map.origin) / res), Math.floor((v.y - map.origin) / res)]
   const [sx, sy] = cell(start)
@@ -172,6 +198,7 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
         if (kind[j] === UNKNOWN) step *= p.unknownCost
         // prefer the middle of free space
         if (dist[j] < reach) step += (reach - dist[j]) / reach
+        if (unseen[j] < reach) step += (2 * (reach - unseen[j])) / reach
         const c = cost[i] + step
         if (c < cost[j]) {
           cost[j] = c

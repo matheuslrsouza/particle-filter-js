@@ -366,6 +366,8 @@ export function startLidar(): void {
   let plan: Vec2[] | null = null
   const follower = new PathFollower([], DEFAULT_NAV)
   let navState = ''
+  let stuckSince: { at: number; x: number; y: number } | null = null
+  let backUpUntil = 0
   let lastNavTurn = 0
   const planGeo = new THREE.BufferGeometry()
   const planLine = new THREE.Line(planGeo, new THREE.LineBasicMaterial({ color: 0x4cc9f0 }))
@@ -428,8 +430,29 @@ export function startLidar(): void {
       }
       return
     }
-    navState = cmd.v > 0.01 ? `driving ${(cmd.v * 100).toFixed(0)} cm/s` : `turning ${((cmd.w * 180) / Math.PI).toFixed(0)}°/s`
     if (cmd.done) return clearGoal('Arrived')
+    // stuck (snagged on something the map doesn't show): asked to drive, but not moving. Back up
+    // ~10 cm, add the scan to the map and replan, like the escape of the exploration mode
+    const now = performance.now()
+    const c = center(slam.pose)
+    if (now < backUpUntil) {
+      navState = 'stuck: backing up'
+      if (drive.armed) void bridge.drive(-0.08 * drive.vScale, 0)
+      return
+    }
+    if (cmd.v > 0.03) {
+      if (!stuckSince) stuckSince = { at: now, x: c.x, y: c.y }
+      else if (Math.hypot(c.x - stuckSince.x, c.y - stuckSince.y) > 0.03) stuckSince = { at: now, x: c.x, y: c.y }
+      else if (now - stuckSince.at > 2000) {
+        stuckSince = null
+        backUpUntil = now + 1300
+        slam.insertNow(latest!.points)
+        mapDirty = true
+        setTimeout(() => goal && !replan() && clearGoal('Stuck: no way out found'), 1400)
+        return
+      }
+    } else stuckSince = null
+    navState = cmd.v > 0.01 ? `driving ${(cmd.v * 100).toFixed(0)} cm/s` : `turning ${((cmd.w * 180) / Math.PI).toFixed(0)}°/s`
     if (drive.armed) void bridge.drive(cmd.v * drive.vScale, cmd.w * drive.wScale)
   }
 
