@@ -62,13 +62,16 @@ const BLOCKED = 2
  * cell, or null when the goal can't be reached. The start may be inside the inflated band (the
  * robot can be close to a wall); the walls themselves are never crossed.
  */
-/** A* path (null if unreachable). */
+/** A* path to the goal itself (null if unreachable). */
 export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavParams = DEFAULT_NAV, visited: Vec2[] = []): Vec2[] | null {
-  return planRoute(map, start, goal, p, visited)?.path ?? null
+  const r = planRoute(map, start, goal, p, visited)
+  return r && !r.partial ? r.path : null
 }
 
 export interface Route {
   path: Vec2[]
+  /** the goal can't be reached (yet): the path goes to the reachable cell closest to it */
+  partial: boolean
   /** whether the robot's body (radius + 2 cm) can move along a straight segment without touching a wall */
   bodyClear: (a: Vec2, b: Vec2) => boolean
 }
@@ -176,10 +179,13 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
   }
   cost[s] = 0
   open.push(s, h(s))
+  // the expanded cell closest to the goal, in case the goal turns out to be unreachable
+  let closest = s
   while (open.size) {
     const i = open.pop()!
     if (closed[i]) continue
     closed[i] = 1
+    if (h(i) < h(closest)) closest = i
     if (i === g) break
     const x = i % n
     const y = (i / n) | 0
@@ -208,9 +214,12 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
       }
     }
   }
-  if (parent[g] < 0 && g !== s) return null
+  const partial = parent[g] < 0 && g !== s
+  // unreachable: go as close as possible (the map grows on the way, and the replans may find a way)
+  const end = partial ? closest : g
+  if (partial && end === s) return null
   const cells: Vec2[] = []
-  for (let i = g; i >= 0; i = parent[i]) {
+  for (let i = end; i >= 0; i = parent[i]) {
     cells.push({ x: map.origin + ((i % n) + 0.5) * res, y: map.origin + (((i / n) | 0) + 0.5) * res })
     if (i === s) break
   }
@@ -247,7 +256,7 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
     }
     return true
   }
-  return { path: smoothPath(shortcut(cells, segmentClear), clear, p), bodyClear }
+  return { path: smoothPath(shortcut(cells, segmentClear), clear, p), partial, bodyClear }
 }
 
 /** Line of sight: from each kept point, jump to the farthest point it can reach in a straight line. */

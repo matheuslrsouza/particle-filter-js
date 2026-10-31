@@ -148,6 +148,13 @@ describe('planning on the SLAM map', () => {
     // (across the whole map, so there is no way around it through unknown space)
     for (let y = -2.9; y <= 2.9; y += 0.03) set(1, y, DEFAULT_SLAM.clamp)
     expect(planOnMap(g, { x: 0, y: 0 }, { x: 2, y: 0 })).toBeNull()
+    // unreachable: the route goes as close as it can, up to the fake wall's inflated band
+    const { planRoute } = await import('./slam/navigate')
+    const r = planRoute(g, { x: 0, y: 0 }, { x: 2, y: 0 })!
+    expect(r.partial).toBe(true)
+    const end = r.path[r.path.length - 1]
+    expect(end.x).toBeGreaterThan(0.6)
+    expect(end.x).toBeLessThan(1)
     const path = Array.from({ length: 21 }, (_, i) => ({ x: i * 0.1, y: 0 }))
     expect(planOnMap(g, { x: 2, y: 0 }, { x: 0, y: 0 }, undefined, path)).not.toBeNull()
   })

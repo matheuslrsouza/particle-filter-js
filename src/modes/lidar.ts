@@ -373,6 +373,7 @@ export function startLidar(): void {
   let plan: Vec2[] | null = null
   const follower = new PathFollower([], DEFAULT_NAV)
   let lastPlanMsg = ''
+  let partial = false
   let navState = ''
   const setNav = (s: string) => {
     navState = s
@@ -407,7 +408,8 @@ export function startLidar(): void {
     const route = planRoute(slam.maps[0], center(slam.pose), goal, DEFAULT_NAV)
     plan = route?.path ?? null
     const len = plan ? plan.reduce((a, q, i) => (i ? a + Math.hypot(q.x - plan![i - 1].x, q.y - plan![i - 1].y) : 0), 0) : 0
-    const msg = plan ? `path: ${len.toFixed(2)} m` : 'no path'
+    partial = route?.partial ?? false
+    const msg = plan ? `path: ${len.toFixed(2)} m${partial ? ' (goal not reachable yet: going as close as possible)' : ''}` : 'no path'
     if (msg !== lastPlanMsg || !plan) log(msg)
     lastPlanMsg = msg
     // keeps its latency state (last command) across replans
@@ -448,7 +450,15 @@ export function startLidar(): void {
       }
       return
     }
-    if (cmd.done) return clearGoal('Arrived')
+    if (cmd.done) {
+      // at the end of a partial path, one more replan (the map has grown): a way on, or give up
+      if (partial) {
+        slam.insertNow(latest!.points)
+        if (replan() && !partial) return
+        return clearGoal("Can't reach the goal: this is as close as it gets")
+      }
+      return clearGoal('Arrived')
+    }
     // stuck (snagged on something the map doesn't show): asked to drive, but not moving. Back up
     // ~10 cm, add the scan to the map and replan, like the escape of the exploration mode
     const now = performance.now()
