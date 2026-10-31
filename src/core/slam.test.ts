@@ -120,3 +120,23 @@ describe('navigating the SLAM map', () => {
     expect(Math.hypot(truth.x - goalWorld.x, truth.y - goalWorld.y)).toBeLessThan(0.2)
   })
 })
+
+describe('planning on the SLAM map', () => {
+  it('treats the places the robot has been as free, even if the map marks them as walls', async () => {
+    const { OccupancyGrid, DEFAULT_SLAM } = await import('./slam/hector')
+    const { planOnMap } = await import('./slam/navigate')
+    const g = new OccupancyGrid(0.03, 6)
+    const set = (x: number, y: number, v: number) => {
+      const ix = Math.floor((x - g.origin) / 0.03)
+      const iy = Math.floor((y - g.origin) / 0.03)
+      g.logOdds[iy * g.cells + ix] = v
+    }
+    // a free 2 m × 1 m strip, with a fake "wall" across it at x = 1 (echoes of things on the robot)
+    for (let x = -0.5; x <= 2.5; x += 0.03) for (let y = -0.5; y <= 0.5; y += 0.03) set(x, y, -2)
+    // (across the whole map, so there is no way around it through unknown space)
+    for (let y = -2.9; y <= 2.9; y += 0.03) set(1, y, DEFAULT_SLAM.clamp)
+    expect(planOnMap(g, { x: 0, y: 0 }, { x: 2, y: 0 })).toBeNull()
+    const path = Array.from({ length: 21 }, (_, i) => ({ x: i * 0.1, y: 0 }))
+    expect(planOnMap(g, { x: 2, y: 0 }, { x: 0, y: 0 }, undefined, path)).not.toBeNull()
+  })
+})

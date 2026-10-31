@@ -49,15 +49,34 @@ const BLOCKED = 2
  * cell, or null when the goal can't be reached. The start may be inside the inflated band (the
  * robot can be close to a wall); the walls themselves are never crossed.
  */
-export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavParams = DEFAULT_NAV): Vec2[] | null {
+export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavParams = DEFAULT_NAV, visited: Vec2[] = []): Vec2[] | null {
   const n = map.cells
   const res = map.resolution
   const kind = new Uint8Array(n * n)
   // distance (cells) to the nearest wall, by multi-source BFS (8-connected, chessboard metric)
   const dist = new Float32Array(n * n).fill(Infinity)
   const queue: number[] = []
+  // where the robot has been there is no wall, whatever the map says (echoes of things carried on
+  // the robot, people walking by): cells under its body along its path are free
+  const been = new Uint8Array(n * n)
+  const body = Math.ceil(0.15 / res)
+  for (const v of visited) {
+    const cx = Math.floor((v.x - map.origin) / res)
+    const cy = Math.floor((v.y - map.origin) / res)
+    for (let dy = -body; dy <= body; dy++) {
+      for (let dx = -body; dx <= body; dx++) {
+        const x = cx + dx
+        const y = cy + dy
+        if (x >= 0 && y >= 0 && x < n && y < n && dx * dx + dy * dy <= body * body) been[y * n + x] = 1
+      }
+    }
+  }
   for (let i = 0; i < n * n; i++) {
     const l = map.logOdds[i]
+    if (been[i]) {
+      kind[i] = FREE
+      continue
+    }
     if (l > 0.5) {
       dist[i] = 0
       queue.push(i)
@@ -85,7 +104,7 @@ export function planOnMap(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
     }
   }
   const inflateCells = p.inflate / res
-  for (let i = 0; i < n * n; i++) if (dist[i] <= inflateCells) kind[i] = BLOCKED
+  for (let i = 0; i < n * n; i++) if (dist[i] <= inflateCells && !been[i]) kind[i] = BLOCKED
 
   const cell = (v: Vec2): [number, number] => [Math.floor((v.x - map.origin) / res), Math.floor((v.y - map.origin) / res)]
   const [sx, sy] = cell(start)

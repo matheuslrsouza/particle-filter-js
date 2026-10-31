@@ -49,6 +49,9 @@ export function startLidar(): void {
 
   const world = new THREE.Group()
   world.position.copy(CENTER)
+  // the map is right-handed (x forward, y to the left): drawn with x up, y must go to the screen's
+  // left, so the world is mirrored on the screen's x axis (three.js flips the face winding itself)
+  world.scale.x = -1
   scene.add(world)
   const robot = robotBody()
   const rings = rangeRings()
@@ -91,6 +94,8 @@ export function startLidar(): void {
     pointSize: 4,
     minQuality: 1,
     maxRange: 8,
+    /** closer echoes are the robot itself (power bank, ESP32, wires on top of it) */
+    minRange: 0.22,
     // the lidar's angles grow clockwise: mirrored, the map is right-handed (counter-clockwise turns
     // are positive), as the robot's remote control and the navigation expect
     mirror: true,
@@ -150,7 +155,7 @@ export function startLidar(): void {
     await s?.stop()
   }
 
-  const usable = (s: LidarSample) => !Number.isNaN(s.distance) && s.distance >= 0.12 && s.distance <= view.maxRange && s.quality >= view.minQuality
+  const usable = (s: LidarSample) => !Number.isNaN(s.distance) && s.distance >= view.minRange && s.distance <= view.maxRange && s.quality >= view.minQuality
 
   /** One turn → points in the robot frame; with mapping on, also matched and added to the map. */
   function process(rev: Revolution): Turn {
@@ -316,6 +321,7 @@ export function startLidar(): void {
   look.add(view, 'pointSize', 1, 8, 0.5).name('Point size (cm)').onChange((v: number) => (material.size = v / 100))
   look.add(view, 'minQuality', 0, 100, 1).name('Min quality').onChange(redraw)
   look.add(view, 'maxRange', 0.5, 10, 0.5).name('Max range (m)').onChange(redraw)
+  look.add(view, 'minRange', 0.1, 0.5, 0.01).name('Min range (m)')
   look
     .add({ camera: 'top' }, 'camera', { 'Top-down': 'top', Orbit: 'orbit' })
     .name('Camera')
@@ -373,7 +379,7 @@ export function startLidar(): void {
 
   function replan(): boolean {
     if (!goal) return false
-    plan = planOnMap(slam.maps[0], slam.pose, goal)
+    plan = planOnMap(slam.maps[0], slam.pose, goal, DEFAULT_NAV, slam.trajectory)
     planFrom = 0
     setLine(planGeo, plan ? plan.map(toScreen) : [])
     return plan !== null
@@ -407,7 +413,8 @@ export function startLidar(): void {
     raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), rig.camera)
     const hit = new THREE.Vector3()
     if (!raycaster.ray.intersectPlane(ground, hit)) return
-    const local = hit.sub(CENTER)
+    // into the (mirrored) world group's frame
+    const local = world.worldToLocal(hit)
     goal = { x: -local.z, y: local.x }
     goalMarker.position.set(local.x, 0.012, local.z)
     goalMarker.visible = true
@@ -524,6 +531,9 @@ export function startLidar(): void {
     for (let r = 0; r < mapSize; r++) img.data.set(mapPixels.subarray(r * mapSize * 4, (r + 1) * mapSize * 4), (mapSize - 1 - r) * mapSize * 4)
     const layer = Object.assign(document.createElement('canvas'), { width: mapSize, height: mapSize })
     layer.getContext('2d')!.putImageData(img, 0, 0)
+    // mirrored like the screen view (the map's y axis points left)
+    ctx.translate(mapSize, 0)
+    ctx.scale(-1, 1)
     ctx.drawImage(layer, 0, 0)
     const g = slam.maps[0]
     ctx.strokeStyle = '#ff2e88'
@@ -545,7 +555,9 @@ export function startLidar(): void {
     })
   }
 
-  const followed = new THREE.Vector3()
+  // where the robot was on the screen last frame (world coordinates, starting at the view center)
+  world.updateMatrixWorld(true)
+  const followed = robot.getWorldPosition(new THREE.Vector3())
   let last = performance.now()
   renderer.setAnimationLoop((now) => {
     const dt = (now - last) / 1000
@@ -570,7 +582,7 @@ export function startLidar(): void {
       lastMapUpload = now
     }
     // follow: shift the camera by however much the robot moved, keeping the user's zoom and pan
-    const at = robot.position
+    const at = robot.getWorldPosition(new THREE.Vector3())
     if (view.follow) {
       const d = at.clone().sub(followed)
       rig.camera.position.add(d)
