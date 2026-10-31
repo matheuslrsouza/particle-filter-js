@@ -1,3 +1,5 @@
 node_modules
 dist
 scripts/cache
+firmware/**/secrets.h
+firmware/**/build/
