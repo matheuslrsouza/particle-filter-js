@@ -155,6 +155,10 @@ describe('planning on the SLAM map', () => {
     const end = r.path[r.path.length - 1]
     expect(end.x).toBeGreaterThan(0.6)
     expect(end.x).toBeLessThan(1)
+    // a goal on the wall moves to the nearest cell the robot fits in, short of the wall
+    const onWall = planRoute(g, { x: 0, y: 0 }, { x: 1, y: 0 })!
+    expect(onWall).not.toBeNull()
+    expect(onWall.path[onWall.path.length - 1].x).toBeLessThan(1 - 0.2)
     const path = Array.from({ length: 21 }, (_, i) => ({ x: i * 0.1, y: 0 }))
     expect(planOnMap(g, { x: 2, y: 0 }, { x: 0, y: 0 }, undefined, path)).not.toBeNull()
   })

@@ -162,11 +162,33 @@ export function planRoute(map: OccupancyGrid, start: Vec2, goal: Vec2, p: NavPar
 
   const cell = (v: Vec2): [number, number] => [Math.floor((v.x - map.origin) / res), Math.floor((v.y - map.origin) / res)]
   const [sx, sy] = cell(start)
-  const [gx, gy] = cell(goal)
+  let [gx, gy] = cell(goal)
   if (sx < 0 || sy < 0 || gx < 0 || gy < 0 || sx >= n || sy >= n || gx >= n || gy >= n) return null
   const s = sy * n + sx
+  // a goal next to a wall (often one discovered on the way there): the nearest cell the robot fits
+  // in, within ~1 m
+  if (kind[gy * n + gx] === BLOCKED || dist[gy * n + gx] === 0) {
+    const r = Math.ceil(1 / res)
+    let best = -1
+    let bestD = Infinity
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const x = gx + dx
+        const y = gy + dy
+        if (x < 0 || y < 0 || x >= n || y >= n) continue
+        const i = y * n + x
+        const d = dx * dx + dy * dy
+        if (d < bestD && kind[i] !== BLOCKED && dist[i] > 0) {
+          bestD = d
+          best = i
+        }
+      }
+    }
+    if (best < 0) return null
+    gx = best % n
+    gy = (best / n) | 0
+  }
   const g = gy * n + gx
-  if (kind[g] === BLOCKED) return null
 
   const cost = new Float32Array(n * n).fill(Infinity)
   const parent = new Int32Array(n * n).fill(-1)
