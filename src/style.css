@@ -61,3 +61,10 @@ h1 span { color: var(--accent); }
   background: var(--panel); backdrop-filter: blur(6px); font: 11.5px/1.45 ui-monospace, Menlo, monospace; color: var(--fg);
   white-space: pre-wrap;
 }
+#camview {
+  position: absolute; right: 300px; bottom: 16px; width: min(360px, 45vw); border-radius: 10px;
+  border: 1px solid rgba(140, 160, 190, 0.3); background: #000;
+}
+@media (max-width: 640px) {
+  #camview { right: 8px; bottom: 8px; width: 55vw; }
+}

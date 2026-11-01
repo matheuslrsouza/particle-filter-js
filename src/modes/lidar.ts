@@ -11,6 +11,7 @@ import { CameraRig } from '../render/cameras'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
 import { addModeSelector } from '../ui/mode'
+import { locate, ObjectMap, PI_CAMERA_V2, toMap, type Detection } from '../core/vision/objects'
 
 /** the view is a 10 m square with the lidar in the middle */
 const AREA = { width: 10, height: 10 }
@@ -186,6 +187,7 @@ export function startLidar(): void {
 
   function resetMap() {
     clearGoalIfAny()
+    clearObjectsIfAny()
     slam = new HectorSlam()
     turns = []
     mapPixels.fill(0)
@@ -194,8 +196,9 @@ export function startLidar(): void {
     redraw()
   }
 
-  // set once the driving section below exists
+  // set once the driving and camera sections below exist
   let clearGoalIfAny = () => {}
+  let clearObjectsIfAny = () => {}
 
   /** Map cells → texels: free cells dark blue, walls bright, unknown transparent. */
   function uploadMap() {
@@ -547,6 +550,82 @@ export function startLidar(): void {
   clearGoalIfAny = () => {
     if (goal) clearGoal()
   }
+  // ---- camera: YOLO detections (scripts/yolo_cam.py) placed on the map with the lidar ----
+  const camera = {
+    // the notebook runs YOLO: from a phone, the same host as this page
+    url: `http://${location.hostname}:8001`,
+    show: false,
+    mapObjects: true,
+    yaw: 0,
+    minConf: 0.5,
+  }
+  const cam = { ...PI_CAMERA_V2 }
+  const objects = new ObjectMap()
+  const markers = new Map<number, THREE.Group>()
+  const people = new THREE.Group()
+  world.add(people)
+  const video = Object.assign(document.createElement('img'), { id: 'camview', alt: 'camera', hidden: true })
+  document.getElementById('hud')!.appendChild(video)
+  clearObjectsIfAny = () => {
+    objects.objects = []
+    for (const m of markers.values()) world.remove(m)
+    markers.clear()
+  }
+  let camFail = 0
+  setInterval(async () => {
+    if (!camera.show && !camera.mapObjects) return
+    let dets: Detection[]
+    try {
+      const r = await fetch(`${camera.url}/detections`)
+      const j = await r.json()
+      dets = j.detections
+      cam.width = j.size?.[0] || cam.width
+      camFail = 0
+    } catch {
+      if (camFail++ === 3) log(`camera: no answer from ${camera.url} (is scripts/yolo_cam.py running?)`)
+      return
+    }
+    const latest = turns[turns.length - 1]
+    if (!camera.mapObjects || !view.mapping || !latest || slam.lastFit < 0.6) return
+    cam.yaw = (camera.yaw * Math.PI) / 180
+    people.clear()
+    for (const d of dets) {
+      if (d.conf < camera.minConf) continue
+      const at = locate(d, latest.points, cam)
+      if (!at) continue
+      const p = toMap(at, slam.pose)
+      // people move: shown where they are now, not kept on the map
+      if (d.label === 'person') {
+        people.add(objectMarker('person', p))
+        continue
+      }
+      const { object, confirmedNow } = objects.add(d.label, p, performance.now())
+      if (confirmedNow) log(`new object: ${object.label} at (${object.x.toFixed(2)}, ${object.y.toFixed(2)})`)
+      if (object.sightings >= objects.confirmAfter) {
+        let m = markers.get(object.id)
+        if (!m) {
+          m = objectMarker(object.label, object)
+          markers.set(object.id, m)
+          world.add(m)
+        }
+        m.position.set(object.y, 0, -object.x)
+      }
+    }
+  }, 250)
+  const camF = gui.addFolder('Camera (YOLO)')
+  camF.add(camera, 'url').name('YOLO server')
+  camF
+    .add(camera, 'show')
+    .name('Show the video')
+    .onChange((on: boolean) => {
+      video.hidden = !on
+      video.src = on ? `${camera.url}/stream.mjpg` : ''
+    })
+  camF.add(camera, 'mapObjects').name('Put objects on the map')
+  camF.add(camera, 'yaw', -90, 90, 1).name('Camera yaw (°, + left)')
+  camF.add(camera, 'minConf', 0.2, 0.9, 0.05).name('Min confidence')
+  camF.add({ clear: () => clearObjectsIfAny() }, 'clear').name('Clear the objects')
+
   const driveF = gui.addFolder('Drive the robot')
   driveF.add(drive, 'bridge').name('Bridge address').onFinishChange((u: string) => (bridge.url = u.trim()))
   driveF
@@ -777,4 +856,35 @@ function createLogDrawer() {
     if (msg !== last) log(msg)
   }
   return { log, logOnce }
+}
+
+const OBJECT_COLORS: Record<string, number> = { person: 0xff2e88, chair: 0xffb703, couch: 0x4cc9f0, bed: 0x9b5de5, 'dining table': 0x06d6a0, tv: 0x8ecae6 }
+
+/**
+ * A map marker: a short colored post and the label floating above it. The world group is mirrored on
+ * the screen's x axis, so the label sprite is mirrored back to read normally.
+ */
+function objectMarker(label: string, at: { x: number; y: number }): THREE.Group {
+  const g = new THREE.Group()
+  const color = OBJECT_COLORS[label] ?? 0xe9edf2
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.3, 16), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35 }))
+  post.position.y = 0.15
+  const canvas = document.createElement('canvas')
+  canvas.width = 256
+  canvas.height = 64
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = 'rgba(11,15,22,0.85)'
+  ctx.fillRect(0, 0, 256, 64)
+  ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`
+  ctx.font = 'bold 34px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(label, 128, 34)
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }))
+  sprite.scale.set(-0.5, 0.125, 1)
+  sprite.position.y = 0.45
+  sprite.renderOrder = 20
+  g.add(post, sprite)
+  g.position.set(at.y, 0, -at.x)
+  return g
 }
