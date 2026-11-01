@@ -5,7 +5,8 @@ serves the annotated video plus the detections:
   http://localhost:8001/            annotated video (MJPEG, also opens on a phone via the notebook's IP)
   http://localhost:8001/detections  latest detections as JSON (label, confidence, box in pixels)
 
-  ~/.venvs/yolo/bin/python scripts/yolo_cam.py [--source http://picam.local:8000/stream.mjpg] [--model yolo11n.pt]
+  ~/.venvs/yolo/bin/python scripts/yolo_cam.py [--source http://picam.local:8000/stream.mjpg] [--model yolo11n.pt] [--device auto|cpu|intel:gpu]
+(pip install ultralytics opencv-python-headless openvino; OpenVINO is optional)
 """
 import argparse
 import json
@@ -29,10 +30,33 @@ p.add_argument('--port', type=int, default=8001)
 p.add_argument('--imgsz', type=int, default=416)
 # leave cores for the browser (3D view, SLAM): with all of them YOLO and the page slow each other down
 p.add_argument('--threads', type=int, default=4)
+# 'auto': OpenVINO on the Intel GPU when available (frees the CPU for the page; on an Iris Xe ~70 ms vs
+# ~111 ms for PyTorch on 4 threads with the notebook busy), else PyTorch on the CPU
+p.add_argument('--device', default='auto')
 args = p.parse_args()
 torch.set_num_threads(args.threads)
 
-model = YOLO(args.model)
+
+def pick_model():
+    if args.device != 'auto' or not args.model.endswith('.pt'):
+        return YOLO(args.model), (None if args.device == 'auto' else args.device)
+    try:
+        import openvino as ov
+
+        if 'GPU' not in ov.Core().available_devices:
+            raise RuntimeError('no Intel GPU')
+        path = args.model[:-3] + '_openvino_model'
+        if not os.path.isdir(path):
+            YOLO(args.model).export(format='openvino', imgsz=args.imgsz)
+        print('YOLO on the Intel GPU (OpenVINO)')
+        return YOLO(path, task='detect'), 'intel:gpu'
+    except Exception as e:
+        print('YOLO on the CPU (PyTorch):', e)
+        return YOLO(args.model), None
+
+
+model, device = pick_model()
+
 state = {'jpeg': None, 'detections': [], 'fps': 0.0, 'size': [0, 0]}
 cond = threading.Condition()
 
@@ -71,7 +95,7 @@ def detect_loop():
             frame = latest['frame']
             seen = latest['seq']
         t0 = time.time()
-        r = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False)[0]
+        r = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False, **({'device': device} if device else {}))[0]
         infer_ms = (time.time() - t0) * 1000
         dets = [
             {'label': r.names[int(b.cls)], 'conf': round(float(b.conf), 2), 'box': [round(float(v)) for v in b.xyxy[0]]}
