@@ -25,7 +25,8 @@ export interface CameraParams {
   y: number
 }
 
-export const PI_CAMERA_V2: CameraParams = { width: 640, hfov: (62.2 * Math.PI) / 180, yaw: 0, x: 0.06, y: 0 }
+/** on this robot the camera sits on a small tripod 17.5 cm behind the lidar, on the center line */
+export const PI_CAMERA_V2: CameraParams = { width: 640, hfov: (62.2 * Math.PI) / 180, yaw: 0, x: -0.175, y: 0 }
 
 /** Bearing (rad, + to the left) of an image column, for a pinhole camera. */
 export function columnBearing(px: number, cam: CameraParams): number {

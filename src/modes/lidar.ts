@@ -623,6 +623,7 @@ export function startLidar(): void {
     })
   camF.add(camera, 'mapObjects').name('Put objects on the map')
   camF.add(camera, 'yaw', -90, 90, 1).name('Camera yaw (°, + left)')
+  camF.add(cam, 'x', -0.4, 0.3, 0.005).name('Camera ahead of lidar (m)')
   camF.add(camera, 'minConf', 0.2, 0.9, 0.05).name('Min confidence')
   camF.add({ clear: () => clearObjectsIfAny() }, 'clear').name('Clear the objects')
 
