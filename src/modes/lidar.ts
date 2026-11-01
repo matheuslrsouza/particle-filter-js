@@ -11,7 +11,7 @@ import { CameraRig } from '../render/cameras'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
 import { addModeSelector } from '../ui/mode'
-import { locate, ObjectMap, PI_CAMERA_V2, toMap, type Detection } from '../core/vision/objects'
+import { FURNITURE, locate, MOVING, ObjectMap, PI_CAMERA_V2, toMap, type Detection } from '../core/vision/objects'
 
 /** the view is a 10 m square with the lidar in the middle */
 const AREA = { width: 10, height: 10 }
@@ -176,6 +176,17 @@ export function startLidar(): void {
     const all = scanToPoints(raw, { ...opts, motion: view.mapping && view.deskew ? slam.motion : undefined })
     // drop echoes from inside the robot's own body (the body's center is behind the lidar)
     const keep = all.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    // and echoes from people or animals the camera sees (checked with the last pose: close enough)
+    if (movingNow.length) {
+      const c = Math.cos(slam.pose.theta)
+      const sn = Math.sin(slam.pose.theta)
+      all.forEach((q, i) => {
+        if (!keep[i]) return
+        const mx = slam.pose.x + c * q.x - sn * q.y
+        const my = slam.pose.y + sn * q.x + c * q.y
+        if (movingNow.some((z) => Math.hypot(mx - z.x, my - z.y) < 0.45)) keep[i] = false
+      })
+    }
     const samples = raw.filter((_, i) => keep[i])
     const points = all.filter((_, i) => keep[i])
     if (!view.mapping) return { rev, samples, points, pose: { x: 0, y: 0, theta: 0 } }
@@ -196,6 +207,8 @@ export function startLidar(): void {
     redraw()
   }
 
+  /** where the camera saw people or animals (map frame), lately: their echoes stay out of the map */
+  let movingNow: { x: number; y: number; until: number }[] = []
   // set once the driving and camera sections below exist
   let clearGoalIfAny = () => {}
   let clearObjectsIfAny = () => {}
@@ -589,16 +602,21 @@ export function startLidar(): void {
     if (!camera.mapObjects || !view.mapping || !latest || slam.lastFit < 0.6) return
     cam.yaw = (camera.yaw * Math.PI) / 180
     people.clear()
+    movingNow = movingNow.filter((z) => z.until > performance.now())
     for (const d of dets) {
       if (d.conf < camera.minConf) continue
       const at = locate(d, latest.points, cam)
       if (!at) continue
       const p = toMap(at, slam.pose)
-      // people move: shown where they are now, not kept on the map
-      if (d.label === 'person') {
-        people.add(objectMarker('person', p))
+      // people and animals move: shown where they are now, and their lidar echoes kept out of
+      // the map for a moment (a dog standing still would become a wall)
+      if (MOVING.has(d.label)) {
+        people.add(objectMarker(d.label, p))
+        movingNow.push({ x: p.x, y: p.y, until: performance.now() + 1500 })
         continue
       }
+      // only furniture stays on the map (other classes are often wrong guesses: a "cow" rug)
+      if (!FURNITURE.has(d.label)) continue
       const { object, confirmedNow } = objects.add(d.label, p, performance.now())
       if (confirmedNow) log(`new object: ${object.label} at (${object.x.toFixed(2)}, ${object.y.toFixed(2)})`)
       if (object.sightings >= objects.confirmAfter) {
@@ -859,7 +877,7 @@ function createLogDrawer() {
   return { log, logOnce }
 }
 
-const OBJECT_COLORS: Record<string, number> = { person: 0xff2e88, chair: 0xffb703, couch: 0x4cc9f0, bed: 0x9b5de5, 'dining table': 0x06d6a0, tv: 0x8ecae6 }
+const OBJECT_COLORS: Record<string, number> = { person: 0xff2e88, dog: 0xf4a261, cat: 0xf4a261, chair: 0xffb703, couch: 0x4cc9f0, bed: 0x9b5de5, 'dining table': 0x06d6a0, tv: 0x8ecae6 }
 
 /**
  * A map marker: a short colored post and the label floating above it. The world group is mirrored on

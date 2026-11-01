@@ -39,8 +39,10 @@ export const DEFAULT_SLAM: SlamParams = {
   size: 24,
   levels: 3,
   hit: 0.9,
-  miss: -0.3,
-  clamp: 6,
+  // a lower clamp and stronger misses let things that moved away (a dog, a chair) fade in ~8 scans;
+  // walls are hit every turn, so they stay (same or better match on the recordings)
+  miss: -0.4,
+  clamp: 3.5,
   updateDistance: 0.04,
   updateAngle: 0.06,
   iterations: 12,

@@ -56,6 +56,11 @@ export function locate(det: Detection, points: Vec2[], cam: CameraParams): Vec2 
   return { x: pick.p.x, y: pick.p.y }
 }
 
+/** COCO classes that stay where they are: kept on the map */
+export const FURNITURE = new Set(['chair', 'couch', 'bed', 'dining table', 'toilet', 'tv', 'refrigerator', 'oven', 'sink', 'microwave', 'potted plant', 'bench'])
+/** COCO classes that move: shown where they are now, never kept */
+export const MOVING = new Set(['person', 'dog', 'cat', 'bird', 'horse', 'sheep', 'cow'])
+
 export interface MapObject {
   id: number
   label: string
@@ -73,7 +78,7 @@ export class ObjectMap {
     /** same label within this distance (m) is the same object */
     public mergeRadius = 0.5,
     /** sightings before an object counts */
-    public confirmAfter = 3,
+    public confirmAfter = 4,
   ) {}
 
   get confirmed(): MapObject[] {
