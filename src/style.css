@@ -62,8 +62,14 @@ h1 span { color: var(--accent); }
   white-space: pre-wrap;
 }
 #camview {
-  position: absolute; right: 300px; bottom: 16px; width: min(360px, 45vw); border-radius: 10px;
+  position: absolute; right: 300px; bottom: 16px; width: min(420px, 45vw); border-radius: 10px; overflow: hidden;
   border: 1px solid rgba(140, 160, 190, 0.3); background: #000;
+}
+#camview img { display: block; width: 100%; }
+#camview canvas { position: absolute; inset: 0; pointer-events: none; }
+#camview .caminfo {
+  position: absolute; left: 6px; bottom: 6px; padding: 2px 6px; border-radius: 4px; background: rgba(11, 15, 22, 0.7);
+  font: 11px ui-monospace, Menlo, monospace; color: var(--fg);
 }
 @media (max-width: 640px) {
   #camview { right: 8px; bottom: 8px; width: 55vw; }

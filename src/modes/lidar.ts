@@ -567,7 +567,10 @@ export function startLidar(): void {
   const camera = {
     // the notebook runs YOLO: from a phone, the same host as this page
     url: `http://${location.hostname}:8001`,
+    // the raw video comes straight from the Pi (smooth); YOLO's boxes are drawn over it
+    piUrl: 'http://picam.local:8000',
     show: false,
+    videoMode: 'raw' as 'raw' | 'yolo',
     mapObjects: true,
     yaw: 0,
     minConf: 0.5,
@@ -577,27 +580,69 @@ export function startLidar(): void {
   const markers = new Map<number, THREE.Group>()
   const people = new THREE.Group()
   world.add(people)
-  const video = Object.assign(document.createElement('img'), { id: 'camview', alt: 'camera', hidden: true })
-  document.getElementById('hud')!.appendChild(video)
+  const camBox = Object.assign(document.createElement('div'), { id: 'camview', hidden: true })
+  const video = Object.assign(document.createElement('img'), { alt: 'camera' })
+  const overlay = document.createElement('canvas')
+  const camInfo = Object.assign(document.createElement('div'), { className: 'caminfo' })
+  camBox.append(video, overlay, camInfo)
+  document.getElementById('hud')!.appendChild(camBox)
+  let shownDets: Detection[] = []
+  /** YOLO's boxes over the raw video, scaled from the detection frame to the shown size */
+  const drawBoxes = () => {
+    const w = video.clientWidth
+    const h = video.clientHeight
+    if (overlay.width !== w || overlay.height !== h) Object.assign(overlay, { width: w, height: h })
+    const ctx = overlay.getContext('2d')!
+    ctx.clearRect(0, 0, w, h)
+    if (camera.videoMode !== 'raw') return
+    const k = w / (cam.width || 640)
+    ctx.font = '600 12px system-ui, sans-serif'
+    ctx.lineWidth = 2
+    for (const d of shownDets) {
+      const [x1, y1, x2, y2] = d.box.map((v) => v * k)
+      const color = `#${(OBJECT_COLORS[d.label] ?? 0x39ff88).toString(16).padStart(6, '0')}`
+      ctx.strokeStyle = color
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+      const text = `${d.label} ${d.conf.toFixed(2)}`
+      ctx.fillStyle = color
+      ctx.fillRect(x1, y1 - 16, ctx.measureText(text).width + 8, 16)
+      ctx.fillStyle = '#0b0f16'
+      ctx.fillText(text, x1 + 4, y1 - 4)
+    }
+  }
+  const setVideoSource = () => {
+    video.src = !camera.show ? '' : camera.videoMode === 'raw' ? `${camera.piUrl}/stream.mjpg` : `${camera.url}/stream.mjpg`
+    drawBoxes()
+  }
   clearObjectsIfAny = () => {
     objects.objects = []
     for (const m of markers.values()) world.remove(m)
     markers.clear()
   }
   let camFail = 0
+  let mapTick = 0
+  let polling = false
+  // detections ~10 times a second (smooth boxes); the map is updated with every other batch
   setInterval(async () => {
-    if (!camera.show && !camera.mapObjects) return
+    if ((!camera.show && !camera.mapObjects) || polling) return
+    polling = true
     let dets: Detection[]
     try {
       const r = await fetch(`${camera.url}/detections`)
       const j = await r.json()
       dets = j.detections
       cam.width = j.size?.[0] || cam.width
+      camInfo.textContent = `YOLO ${j.fps} fps · ${j.ms} ms · boxes ${Math.round((j.age ?? 0) * 1000)} ms old`
+      shownDets = dets
+      drawBoxes()
       camFail = 0
     } catch {
       if (camFail++ === 3) log(`camera: no answer from ${camera.url} (is scripts/yolo_cam.py running?)`)
       return
+    } finally {
+      polling = false
     }
+    if (mapTick++ % 2) return
     const latest = turns[turns.length - 1]
     if (!camera.mapObjects || !view.mapping || !latest || slam.lastFit < 0.6) return
     cam.yaw = (camera.yaw * Math.PI) / 180
@@ -629,16 +674,21 @@ export function startLidar(): void {
         m.position.set(object.y, 0, -object.x)
       }
     }
-  }, 250)
+  }, 100)
   const camF = gui.addFolder('Camera (YOLO)')
   camF.add(camera, 'url').name('YOLO server')
   camF
     .add(camera, 'show')
     .name('Show the video')
     .onChange((on: boolean) => {
-      video.hidden = !on
-      video.src = on ? `${camera.url}/stream.mjpg` : ''
+      camBox.hidden = !on
+      setVideoSource()
     })
+  camF
+    .add(camera, 'videoMode', { 'Raw video + boxes (smooth)': 'raw', 'YOLO annotated video': 'yolo' })
+    .name('Video')
+    .onChange(setVideoSource)
+  camF.add(camera, 'piUrl').name('Camera (Pi)').onFinishChange(setVideoSource)
   camF.add(camera, 'mapObjects').name('Put objects on the map')
   camF.add(camera, 'yaw', -90, 90, 1).name('Camera yaw (°, + left)')
   camF.add(cam, 'x', -0.4, 0.3, 0.005).name('Camera ahead of lidar (m)')

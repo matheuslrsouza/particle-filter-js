@@ -9,19 +9,28 @@ serves the annotated video plus the detections:
 """
 import argparse
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import cv2
-from ultralytics import YOLO
+# low-latency reading of the MJPEG stream (no ffmpeg input buffering)
+os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS', 'fflags;nobuffer|flags;low_delay')
+import cv2  # noqa: E402
+import torch  # noqa: E402
+from ultralytics import YOLO  # noqa: E402
 
 p = argparse.ArgumentParser()
 p.add_argument('--source', default='http://picam.local:8000/stream.mjpg')
 p.add_argument('--model', default='yolo11n.pt')
 p.add_argument('--conf', type=float, default=0.4)
 p.add_argument('--port', type=int, default=8001)
+# 416 px: ~33 ms per frame on an i7-11390H (640: ~58 ms), little loss for furniture-sized objects
+p.add_argument('--imgsz', type=int, default=416)
+# leave cores for the browser (3D view, SLAM): with all of them YOLO and the page slow each other down
+p.add_argument('--threads', type=int, default=4)
 args = p.parse_args()
+torch.set_num_threads(args.threads)
 
 model = YOLO(args.model)
 state = {'jpeg': None, 'detections': [], 'fps': 0.0, 'size': [0, 0]}
@@ -61,7 +70,9 @@ def detect_loop():
                 latest_cond.wait()
             frame = latest['frame']
             seen = latest['seq']
-        r = model(frame, conf=args.conf, verbose=False)[0]
+        t0 = time.time()
+        r = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False)[0]
+        infer_ms = (time.time() - t0) * 1000
         dets = [
             {'label': r.names[int(b.cls)], 'conf': round(float(b.conf), 2), 'box': [round(float(v)) for v in b.xyxy[0]]}
             for b in r.boxes
@@ -73,6 +84,8 @@ def detect_loop():
             state['detections'] = dets
             state['fps'] = 0.8 * state['fps'] + 0.2 / max(now - last, 1e-3)
             state['size'] = [frame.shape[1], frame.shape[0]]
+            state['ms'] = 0.8 * state.get('ms', infer_ms) + 0.2 * infer_ms
+            state['at'] = now
             cond.notify_all()
         last = now
 
@@ -81,7 +94,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/detections':
             with cond:
-                body = json.dumps({'fps': round(state['fps'], 1), 'size': state['size'], 'detections': state['detections']}).encode()
+                body = json.dumps({
+                    'fps': round(state['fps'], 1),
+                    'ms': round(state.get('ms', 0)),
+                    # seconds since these detections were made
+                    'age': round(time.time() - state.get('at', time.time()), 2),
+                    'size': state['size'],
+                    'detections': state['detections'],
+                }).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')

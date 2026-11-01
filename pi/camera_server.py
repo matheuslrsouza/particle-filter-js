@@ -11,7 +11,7 @@ from threading import Condition
 
 import picamera
 
-WIDTH, HEIGHT, FPS = (int(a) for a in sys.argv[1:4]) if len(sys.argv) >= 4 else (640, 480, 15)
+WIDTH, HEIGHT, FPS = (int(a) for a in sys.argv[1:4]) if len(sys.argv) >= 4 else (640, 480, 24)
 
 PAGE = """<html><head><title>picam</title><meta name="viewport" content="width=device-width"></head>
 <body style="margin:0;background:#000"><img src="stream.mjpg" style="width:100%"></body></html>"""
