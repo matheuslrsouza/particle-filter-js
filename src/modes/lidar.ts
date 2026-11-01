@@ -190,9 +190,9 @@ export function startLidar(): void {
     const samples = raw.filter((_, i) => keep[i])
     const points = all.filter((_, i) => keep[i])
     if (!view.mapping) return { rev, samples, points, pose: { x: 0, y: 0, theta: 0 } }
-    const before = slam.trajectory.length
+    const before = slam.inserts
     const pose = { ...slam.addScan(points) }
-    if (slam.trajectory.length !== before) mapDirty = true
+    if (slam.inserts !== before) mapDirty = true
     return { rev, samples, points, pose }
   }
 
