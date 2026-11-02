@@ -452,7 +452,9 @@ export function startLidar(): void {
     const cmd = follower.step(center(slam.pose))
     const latest = turns[turns.length - 1]
     // in the body's frame: up to 12 cm beyond its front edge, as wide as the body
-    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
+    // the faster it goes, the farther it looks: what it travels during the loop's latency, twice
+    const reach = DEFAULT_NAV.robotRadius + 0.12 + 2 * DEFAULT_NAV.vMax * DEFAULT_NAV.latency
+    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < reach && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
     if (cmd.v > 0 && latest?.points.some(ahead)) {
       // no forward motion, but keep turning toward the path: turning is what clears the front
       const w = Math.sign(cmd.w || 1) * Math.max(0.3, Math.abs(cmd.w))
@@ -550,7 +552,8 @@ export function startLidar(): void {
     const { v, w } = drive.manual
     if (drive.armed && (v || w)) {
       if (goal) clearGoal()
-      void bridge.drive(v * 80, w * 50)
+      // by hand: the same limits as the navigation
+      void bridge.drive(v * DEFAULT_NAV.vMax * drive.vScale, w * DEFAULT_NAV.wMax * drive.wScale)
       return
     }
     // the firmware only spins the lidar while it gets remote-control steps: zero-speed steps keep
@@ -745,6 +748,26 @@ export function startLidar(): void {
     )
     .name('Calibrate front (drives 15 cm)')
   driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
+  // speeds in friendly units, stored in m/s and rad/s, remembered in the browser
+  const speeds = { maxSpeed: DEFAULT_NAV.vMax * 100, maxTurn: (DEFAULT_NAV.wMax * 180) / Math.PI }
+  try {
+    const saved = JSON.parse(localStorage.getItem('lidar.speeds') ?? 'null')
+    if (saved) Object.assign(speeds, saved)
+  } catch {
+    /* storage blocked */
+  }
+  const applySpeeds = () => {
+    DEFAULT_NAV.vMax = speeds.maxSpeed / 100
+    DEFAULT_NAV.wMax = (speeds.maxTurn * Math.PI) / 180
+    try {
+      localStorage.setItem('lidar.speeds', JSON.stringify(speeds))
+    } catch {
+      /* storage blocked */
+    }
+  }
+  applySpeeds()
+  driveF.add(speeds, 'maxSpeed', 4, 40, 1).name('Max speed (cm/s)').onChange(applySpeeds)
+  driveF.add(speeds, 'maxTurn', 15, 120, 1).name('Max turn (°/s)').onChange(applySpeeds)
   driveF.add(DEFAULT_NAV, 'inflate', 0.18, 0.4, 0.01).name('Wall clearance (m)')
   driveF.add(DEFAULT_NAV, 'lookahead', 0.2, 0.8, 0.05).name('Look-ahead (m)')
   driveF.add(DEFAULT_NAV, 'latency', 0, 0.8, 0.05).name('Latency (s)')
