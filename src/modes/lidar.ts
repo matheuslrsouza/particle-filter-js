@@ -577,6 +577,7 @@ export function startLidar(): void {
     piUrl: 'http://picam.local:8000',
     show: false,
     videoMode: 'raw' as 'raw' | 'yolo',
+    light: 'auto' as 'auto' | 'day' | 'night',
     mapObjects: true,
     yaw: 0,
     minConf: 0.5,
@@ -638,7 +639,7 @@ export function startLidar(): void {
       const j = await r.json()
       dets = j.detections
       cam.width = j.size?.[0] || cam.width
-      camInfo.textContent = `YOLO ${j.fps} fps · ${j.ms} ms · boxes ${Math.round((j.age ?? 0) * 1000)} ms old`
+      camInfo.textContent = `YOLO ${j.fps} fps · ${j.ms} ms · boxes ${Math.round((j.age ?? 0) * 1000)} ms old${piLight ? ` · ${piLight}` : ''}`
       shownDets = dets
       drawBoxes()
       camFail = 0
@@ -695,6 +696,22 @@ export function startLidar(): void {
     .name('Video')
     .onChange(setVideoSource)
   camF.add(camera, 'piUrl').name('Camera (Pi)').onFinishChange(setVideoSource)
+  // night mode on the Pi: longer exposure, higher gain, 10 fps, black and white (needs IR light in the dark)
+  let piLight = ''
+  const lightMode = (set?: string) =>
+    fetch(`${camera.piUrl}/mode${set ? `?set=${set}` : ''}`)
+      .then((r) => r.json())
+      .then((j) => {
+        const now = `${j.night ? 'night' : 'day'} (brightness ${j.brightness})`
+        if (j.night !== piLight.startsWith('night')) log(`camera: ${j.night ? 'night' : 'day'} mode`)
+        piLight = now
+      })
+      .catch(() => {})
+  camF
+    .add(camera, 'light', { 'Auto (by brightness)': 'auto', Day: 'day', 'Night (IR)': 'night' })
+    .name('Light')
+    .onChange((m: string) => lightMode(m))
+  setInterval(() => camera.show && lightMode(), 3000)
   camF.add(camera, 'mapObjects').name('Put objects on the map')
   camF.add(camera, 'yaw', -90, 90, 1).name('Camera yaw (°, + left)')
   camF.add(cam, 'x', -0.4, 0.3, 0.005).name('Camera ahead of lidar (m)')
