@@ -175,7 +175,10 @@ export function startLidar(): void {
     const opts = { mirror: view.mirror, rotation: view.rotation, minRange: 0, maxRange: Infinity, minQuality: 0 }
     const all = scanToPoints(raw, { ...opts, motion: view.mapping && view.deskew ? slam.motion : undefined })
     // drop echoes from inside the robot's own body (the body's center is behind the lidar)
-    const keep = all.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    // judged on the points as measured: the deskew moves echoes of things carried on the robot as if
+    // they were fixed in the room, pushing them out of the body at speed (a trail of fake obstacles)
+    const measured = view.mapping && view.deskew ? scanToPoints(raw, opts) : all
+    const keep = measured.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
     // and echoes from people or animals the camera sees (checked with the last pose: close enough)
     if (movingNow.length) {
       const c = Math.cos(slam.pose.theta)
