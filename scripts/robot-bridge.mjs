@@ -119,8 +119,8 @@ createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
   try {
     if (url.pathname === '/drive') {
-      // limits: about 15 cm/s and a slow turn, until the controller is trusted
-      cmd = { v: clamp(url.searchParams.get('v'), 120), w: clamp(url.searchParams.get('w'), 80), at: Date.now() }
+      // hard ceiling only (the page sets the actual speed limits): ~40 cm/s and a brisk turn
+      cmd = { v: clamp(url.searchParams.get('v'), 300), w: clamp(url.searchParams.get('w'), 150), at: Date.now() }
       res.end(JSON.stringify({ ok: true, ...cmd }))
     } else if (url.pathname === '/stop') {
       cmd = { v: 0, w: 0, at: 0 }

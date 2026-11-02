@@ -32,6 +32,8 @@ export interface SlamParams {
   searchShift: number
   /** scans that fit worse than this after matching are not added to the map */
   minFitToInsert: number
+  /** standing still, the map is still refreshed every this many scans (what was hidden shows up) */
+  refreshScans: number
 }
 
 export const DEFAULT_SLAM: SlamParams = {
@@ -39,8 +41,10 @@ export const DEFAULT_SLAM: SlamParams = {
   size: 24,
   levels: 3,
   hit: 0.9,
-  miss: -0.3,
-  clamp: 6,
+  // a lower clamp and stronger misses let things that moved away (a dog, a chair) fade in ~8 scans;
+  // walls are hit every turn, so they stay (same or better match on the recordings)
+  miss: -0.4,
+  clamp: 3.5,
   updateDistance: 0.04,
   updateAngle: 0.06,
   iterations: 12,
@@ -48,6 +52,7 @@ export const DEFAULT_SLAM: SlamParams = {
   searchAngleStep: 0.026,
   searchShift: 0.1,
   minFitToInsert: 0.5,
+  refreshScans: 10,
 }
 
 export class OccupancyGrid {
@@ -139,6 +144,9 @@ export class HectorSlam {
   scans = 0
   private prev: Pose = { x: 0, y: 0, theta: 0 }
   private lastInsert: Pose | null = null
+  private sinceInsert = 0
+  /** how many times the map was updated (to know when to redraw it) */
+  inserts = 0
 
   constructor(readonly p: SlamParams = DEFAULT_SLAM) {
     this.maps = Array.from({ length: p.levels }, (_, k) => new OccupancyGrid(p.resolution * 2 ** k, p.size))
@@ -177,10 +185,16 @@ export class HectorSlam {
     this.pose = guess
     this.lastFit = this.fit(points)
     const li = this.lastInsert
-    if (this.lastFit >= this.p.minFitToInsert && (Math.hypot(guess.x - li.x, guess.y - li.y) > this.p.updateDistance || Math.abs(wrapAngle(guess.theta - li.theta)) > this.p.updateAngle)) {
+    this.sinceInsert++
+    if (this.lastFit >= this.p.minFitToInsert && (this.sinceInsert >= this.p.refreshScans || Math.hypot(guess.x - li.x, guess.y - li.y) > this.p.updateDistance || Math.abs(wrapAngle(guess.theta - li.theta)) > this.p.updateAngle)) {
       for (const m of this.maps) m.insert(guess, points, this.p)
-      this.lastInsert = { ...guess }
-      this.trajectory.push({ ...guess })
+      this.inserts++
+      this.sinceInsert = 0
+      // the trajectory only grows when the robot actually moved
+      if (Math.hypot(guess.x - li.x, guess.y - li.y) > this.p.updateDistance || Math.abs(wrapAngle(guess.theta - li.theta)) > this.p.updateAngle) {
+        this.lastInsert = { ...guess }
+        this.trajectory.push({ ...guess })
+      }
     }
     return this.pose
   }

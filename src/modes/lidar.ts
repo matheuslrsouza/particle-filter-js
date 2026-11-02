@@ -11,6 +11,7 @@ import { CameraRig } from '../render/cameras'
 import { createRenderer, createScene } from '../render/scene'
 import { Hud } from '../ui/hud'
 import { addModeSelector } from '../ui/mode'
+import { FURNITURE, locate, MOVING, ObjectMap, PI_CAMERA_V2, toMap, type Detection } from '../core/vision/objects'
 
 /** the view is a 10 m square with the lidar in the middle */
 const AREA = { width: 10, height: 10 }
@@ -174,18 +175,33 @@ export function startLidar(): void {
     const opts = { mirror: view.mirror, rotation: view.rotation, minRange: 0, maxRange: Infinity, minQuality: 0 }
     const all = scanToPoints(raw, { ...opts, motion: view.mapping && view.deskew ? slam.motion : undefined })
     // drop echoes from inside the robot's own body (the body's center is behind the lidar)
-    const keep = all.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    // judged on the points as measured: the deskew moves echoes of things carried on the robot as if
+    // they were fixed in the room, pushing them out of the body at speed (a trail of fake obstacles)
+    const measured = view.mapping && view.deskew ? scanToPoints(raw, opts) : all
+    const keep = measured.map((q) => Math.hypot(q.x + LIDAR_AHEAD, q.y) > BODY_ECHO)
+    // and echoes from people or animals the camera sees (checked with the last pose: close enough)
+    if (movingNow.length) {
+      const c = Math.cos(slam.pose.theta)
+      const sn = Math.sin(slam.pose.theta)
+      all.forEach((q, i) => {
+        if (!keep[i]) return
+        const mx = slam.pose.x + c * q.x - sn * q.y
+        const my = slam.pose.y + sn * q.x + c * q.y
+        if (movingNow.some((z) => Math.hypot(mx - z.x, my - z.y) < 0.45)) keep[i] = false
+      })
+    }
     const samples = raw.filter((_, i) => keep[i])
     const points = all.filter((_, i) => keep[i])
     if (!view.mapping) return { rev, samples, points, pose: { x: 0, y: 0, theta: 0 } }
-    const before = slam.trajectory.length
+    const before = slam.inserts
     const pose = { ...slam.addScan(points) }
-    if (slam.trajectory.length !== before) mapDirty = true
+    if (slam.inserts !== before) mapDirty = true
     return { rev, samples, points, pose }
   }
 
   function resetMap() {
     clearGoalIfAny()
+    clearObjectsIfAny()
     slam = new HectorSlam()
     turns = []
     mapPixels.fill(0)
@@ -194,8 +210,11 @@ export function startLidar(): void {
     redraw()
   }
 
-  // set once the driving section below exists
+  /** where the camera saw people or animals (map frame), lately: their echoes stay out of the map */
+  let movingNow: { x: number; y: number; until: number }[] = []
+  // set once the driving and camera sections below exist
   let clearGoalIfAny = () => {}
+  let clearObjectsIfAny = () => {}
 
   /** Map cells → texels: free cells dark blue, walls bright, unknown transparent. */
   function uploadMap() {
@@ -436,7 +455,9 @@ export function startLidar(): void {
     const cmd = follower.step(center(slam.pose))
     const latest = turns[turns.length - 1]
     // in the body's frame: up to 12 cm beyond its front edge, as wide as the body
-    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < DEFAULT_NAV.robotRadius + 0.12 && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
+    // the faster it goes, the farther it looks: what it travels during the loop's latency, twice
+    const reach = DEFAULT_NAV.robotRadius + 0.12 + 2 * DEFAULT_NAV.vMax * DEFAULT_NAV.latency
+    const ahead = (q: Vec2) => q.x + LIDAR_AHEAD > 0 && q.x + LIDAR_AHEAD < reach && Math.abs(q.y) < DEFAULT_NAV.robotRadius + 0.02
     if (cmd.v > 0 && latest?.points.some(ahead)) {
       // no forward motion, but keep turning toward the path: turning is what clears the front
       const w = Math.sign(cmd.w || 1) * Math.max(0.3, Math.abs(cmd.w))
@@ -534,7 +555,8 @@ export function startLidar(): void {
     const { v, w } = drive.manual
     if (drive.armed && (v || w)) {
       if (goal) clearGoal()
-      void bridge.drive(v * 80, w * 50)
+      // by hand: the same limits as the navigation
+      void bridge.drive(v * DEFAULT_NAV.vMax * drive.vScale, w * DEFAULT_NAV.wMax * drive.wScale)
       return
     }
     // the firmware only spins the lidar while it gets remote-control steps: zero-speed steps keep
@@ -547,6 +569,155 @@ export function startLidar(): void {
   clearGoalIfAny = () => {
     if (goal) clearGoal()
   }
+  // ---- camera: YOLO detections (scripts/yolo_cam.py) placed on the map with the lidar ----
+  const camera = {
+    // the notebook runs YOLO: from a phone, the same host as this page
+    url: `http://${location.hostname}:8001`,
+    // the raw video comes straight from the Pi (smooth); YOLO's boxes are drawn over it
+    piUrl: 'http://picam.local:8000',
+    show: false,
+    videoMode: 'raw' as 'raw' | 'yolo',
+    light: 'auto' as 'auto' | 'day' | 'night',
+    mapObjects: true,
+    yaw: 0,
+    minConf: 0.5,
+  }
+  const cam = { ...PI_CAMERA_V2 }
+  const objects = new ObjectMap()
+  const markers = new Map<number, THREE.Group>()
+  const people = new THREE.Group()
+  world.add(people)
+  const camBox = Object.assign(document.createElement('div'), { id: 'camview', hidden: true })
+  const video = Object.assign(document.createElement('img'), { alt: 'camera' })
+  const overlay = document.createElement('canvas')
+  const camInfo = Object.assign(document.createElement('div'), { className: 'caminfo' })
+  camBox.append(video, overlay, camInfo)
+  document.getElementById('hud')!.appendChild(camBox)
+  let shownDets: Detection[] = []
+  /** YOLO's boxes over the raw video, scaled from the detection frame to the shown size */
+  const drawBoxes = () => {
+    const w = video.clientWidth
+    const h = video.clientHeight
+    if (overlay.width !== w || overlay.height !== h) Object.assign(overlay, { width: w, height: h })
+    const ctx = overlay.getContext('2d')!
+    ctx.clearRect(0, 0, w, h)
+    if (camera.videoMode !== 'raw') return
+    const k = w / (cam.width || 640)
+    ctx.font = '600 12px system-ui, sans-serif'
+    ctx.lineWidth = 2
+    for (const d of shownDets) {
+      const [x1, y1, x2, y2] = d.box.map((v) => v * k)
+      const color = `#${(OBJECT_COLORS[d.label] ?? 0x39ff88).toString(16).padStart(6, '0')}`
+      ctx.strokeStyle = color
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+      const text = `${d.label} ${d.conf.toFixed(2)}`
+      ctx.fillStyle = color
+      ctx.fillRect(x1, y1 - 16, ctx.measureText(text).width + 8, 16)
+      ctx.fillStyle = '#0b0f16'
+      ctx.fillText(text, x1 + 4, y1 - 4)
+    }
+  }
+  const setVideoSource = () => {
+    video.src = !camera.show ? '' : camera.videoMode === 'raw' ? `${camera.piUrl}/stream.mjpg` : `${camera.url}/stream.mjpg`
+    drawBoxes()
+  }
+  clearObjectsIfAny = () => {
+    objects.objects = []
+    for (const m of markers.values()) world.remove(m)
+    markers.clear()
+  }
+  let camFail = 0
+  let mapTick = 0
+  let polling = false
+  // detections ~10 times a second (smooth boxes); the map is updated with every other batch
+  setInterval(async () => {
+    if ((!camera.show && !camera.mapObjects) || polling) return
+    polling = true
+    let dets: Detection[]
+    try {
+      const r = await fetch(`${camera.url}/detections`)
+      const j = await r.json()
+      dets = j.detections
+      cam.width = j.size?.[0] || cam.width
+      camInfo.textContent = `YOLO ${j.fps} fps · ${j.ms} ms · boxes ${Math.round((j.age ?? 0) * 1000)} ms old${piLight ? ` · ${piLight}` : ''}`
+      shownDets = dets
+      drawBoxes()
+      camFail = 0
+    } catch {
+      if (camFail++ === 3) log(`camera: no answer from ${camera.url} (is scripts/yolo_cam.py running?)`)
+      return
+    } finally {
+      polling = false
+    }
+    if (mapTick++ % 2) return
+    const latest = turns[turns.length - 1]
+    if (!camera.mapObjects || !view.mapping || !latest || slam.lastFit < 0.6) return
+    cam.yaw = (camera.yaw * Math.PI) / 180
+    people.clear()
+    movingNow = movingNow.filter((z) => z.until > performance.now())
+    for (const d of dets) {
+      if (d.conf < camera.minConf) continue
+      const at = locate(d, latest.points, cam)
+      if (!at) continue
+      const p = toMap(at, slam.pose)
+      // people and animals move: shown where they are now, and their lidar echoes kept out of
+      // the map for a moment (a dog standing still would become a wall)
+      if (MOVING.has(d.label)) {
+        people.add(objectMarker(d.label, p))
+        movingNow.push({ x: p.x, y: p.y, until: performance.now() + 1500 })
+        continue
+      }
+      // only furniture stays on the map (other classes are often wrong guesses: a "cow" rug)
+      if (!FURNITURE.has(d.label)) continue
+      const { object, confirmedNow } = objects.add(d.label, p, performance.now())
+      if (confirmedNow) log(`new object: ${object.label} at (${object.x.toFixed(2)}, ${object.y.toFixed(2)})`)
+      if (object.sightings >= objects.confirmAfter) {
+        let m = markers.get(object.id)
+        if (!m) {
+          m = objectMarker(object.label, object)
+          markers.set(object.id, m)
+          world.add(m)
+        }
+        m.position.set(object.y, 0, -object.x)
+      }
+    }
+  }, 100)
+  const camF = gui.addFolder('Camera (YOLO)')
+  camF.add(camera, 'url').name('YOLO server')
+  camF
+    .add(camera, 'show')
+    .name('Show the video')
+    .onChange((on: boolean) => {
+      camBox.hidden = !on
+      setVideoSource()
+    })
+  camF
+    .add(camera, 'videoMode', { 'Raw video + boxes (smooth)': 'raw', 'YOLO annotated video': 'yolo' })
+    .name('Video')
+    .onChange(setVideoSource)
+  camF.add(camera, 'piUrl').name('Camera (Pi)').onFinishChange(setVideoSource)
+  // night mode on the Pi: longer exposure, higher gain, 10 fps, black and white (needs IR light in the dark)
+  let piLight = ''
+  const lightMode = (set?: string) =>
+    fetch(`${camera.piUrl}/mode${set ? `?set=${set}` : ''}`)
+      .then((r) => r.json())
+      .then((j) => {
+        const now = `${j.night ? 'night' : 'day'} (brightness ${j.brightness})`
+        if (j.night !== piLight.startsWith('night')) log(`camera: ${j.night ? 'night' : 'day'} mode`)
+        piLight = now
+      })
+      .catch(() => {})
+  camF
+    .add(camera, 'light', { 'Auto (by brightness)': 'auto', Day: 'day', 'Night (IR)': 'night' })
+    .name('Light')
+    .onChange((m: string) => lightMode(m))
+  setInterval(() => camera.show && lightMode(), 3000)
+  camF.add(camera, 'mapObjects').name('Put objects on the map')
+  camF.add(camera, 'yaw', -90, 90, 1).name('Camera yaw (°, + left)')
+  camF.add(cam, 'x', -0.4, 0.3, 0.005).name('Camera ahead of lidar (m)')
+  camF.add(camera, 'minConf', 0.2, 0.9, 0.05).name('Min confidence')
+  camF.add({ clear: () => clearObjectsIfAny() }, 'clear').name('Clear the objects')
+
   const driveF = gui.addFolder('Drive the robot')
   driveF.add(drive, 'bridge').name('Bridge address').onFinishChange((u: string) => (bridge.url = u.trim()))
   driveF
@@ -597,6 +768,26 @@ export function startLidar(): void {
     )
     .name('Calibrate front (drives 15 cm)')
   driveF.add({ stop: () => clearGoal('Stopped') }, 'stop').name('STOP (space)')
+  // speeds in friendly units, stored in m/s and rad/s, remembered in the browser
+  const speeds = { maxSpeed: DEFAULT_NAV.vMax * 100, maxTurn: (DEFAULT_NAV.wMax * 180) / Math.PI }
+  try {
+    const saved = JSON.parse(localStorage.getItem('lidar.speeds') ?? 'null')
+    if (saved) Object.assign(speeds, saved)
+  } catch {
+    /* storage blocked */
+  }
+  const applySpeeds = () => {
+    DEFAULT_NAV.vMax = speeds.maxSpeed / 100
+    DEFAULT_NAV.wMax = (speeds.maxTurn * Math.PI) / 180
+    try {
+      localStorage.setItem('lidar.speeds', JSON.stringify(speeds))
+    } catch {
+      /* storage blocked */
+    }
+  }
+  applySpeeds()
+  driveF.add(speeds, 'maxSpeed', 4, 40, 1).name('Max speed (cm/s)').onChange(applySpeeds)
+  driveF.add(speeds, 'maxTurn', 15, 120, 1).name('Max turn (°/s)').onChange(applySpeeds)
   driveF.add(DEFAULT_NAV, 'inflate', 0.18, 0.4, 0.01).name('Wall clearance (m)')
   driveF.add(DEFAULT_NAV, 'lookahead', 0.2, 0.8, 0.05).name('Look-ahead (m)')
   driveF.add(DEFAULT_NAV, 'latency', 0, 0.8, 0.05).name('Latency (s)')
@@ -777,4 +968,35 @@ function createLogDrawer() {
     if (msg !== last) log(msg)
   }
   return { log, logOnce }
+}
+
+const OBJECT_COLORS: Record<string, number> = { person: 0xff2e88, dog: 0xf4a261, cat: 0xf4a261, chair: 0xffb703, couch: 0x4cc9f0, bed: 0x9b5de5, 'dining table': 0x06d6a0, tv: 0x8ecae6 }
+
+/**
+ * A map marker: a short colored post and the label floating above it. The world group is mirrored on
+ * the screen's x axis, so the label sprite is mirrored back to read normally.
+ */
+function objectMarker(label: string, at: { x: number; y: number }): THREE.Group {
+  const g = new THREE.Group()
+  const color = OBJECT_COLORS[label] ?? 0xe9edf2
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.3, 16), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35 }))
+  post.position.y = 0.15
+  const canvas = document.createElement('canvas')
+  canvas.width = 256
+  canvas.height = 64
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = 'rgba(11,15,22,0.85)'
+  ctx.fillRect(0, 0, 256, 64)
+  ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`
+  ctx.font = 'bold 34px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(label, 128, 34)
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }))
+  sprite.scale.set(-0.5, 0.125, 1)
+  sprite.position.y = 0.45
+  sprite.renderOrder = 20
+  g.add(post, sprite)
+  g.position.set(at.y, 0, -at.x)
+  return g
 }
